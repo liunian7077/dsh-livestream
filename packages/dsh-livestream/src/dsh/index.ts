@@ -20,7 +20,7 @@ import type { GameSource, StageEvent } from '../stage/protocol';
 import { splitByMood } from '../core/moodText';
 import { speakable } from '../core/speakable';
 import { GUEST_VOICE } from '../body/voices';
-import { agentReady, asr, broadcast, cookie, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, SECRETS, social, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, type Pace, type Settings } from './runtime';
+import { agentReady, asr, broadcast, cookie, cookieFor, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, SECRETS, social, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, type Pace, type Settings } from './runtime';
 
 export const name = 'dsh-livestream';
 export const inject = ['connection'];
@@ -143,7 +143,7 @@ async function resumeLive(ctx: HostContext, stopped: () => boolean): Promise<voi
   }
   // 等 agent 子插件把推消息的钩子装上
   while (!stopped() && Date.now() < deadline && !agentReady()) await new Promise((r) => setTimeout(r, 500));
-  if (saved.roomId) show.connect(saved.roomId, await cookie(), settings.ownRooms.includes(saved.roomId));
+  if (saved.roomId) show.connect(settings.platform, saved.roomId, await cookieFor(settings.platform), settings.ownRooms.includes(saved.roomId));
   show.resumeLive(saved);
   if (saved.broadcasting && saved.roomId) await broadcast.adopt(saved.roomId);
   const pushing = saved.broadcasting ? `，推流${broadcast.streaming ? '接上了' : '没接上（OBS 已经不在推了）'}` : '（彩排，没在推流）';
@@ -183,6 +183,10 @@ export function apply(ctx: HostContext): void {
       const room = Number(patch.roomId);
       if (!Number.isInteger(room) || room <= 0) return fail('房间号要是正整数');
       next.roomId = room;
+    }
+    if (patch.platform !== undefined) {
+      if (patch.platform !== 'bilibili' && patch.platform !== 'douyin') return fail('只支持 bilibili 和 douyin');
+      next.platform = patch.platform;
     }
     if (patch.character !== undefined) {
       if (!packs.character(String(patch.character))) return fail('没有这个角色包');
@@ -229,7 +233,7 @@ export function apply(ctx: HostContext): void {
 
   route('/api/dsh-livestream/connect', ['POST'], async () => {
     if (!settings.roomId) return fail('先填直播间房间号');
-    show.connect(settings.roomId, await cookie(), settings.ownRooms.includes(settings.roomId));
+    show.connect(settings.platform, settings.roomId, await cookieFor(settings.platform), settings.ownRooms.includes(settings.roomId));
     return json(state());
   }, 'connect');
 

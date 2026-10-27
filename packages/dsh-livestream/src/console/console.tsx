@@ -7,6 +7,7 @@
 
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import QRCode from 'qrcode';
+import type { LivePlatform } from '../core/live';
 
 // ── DSH 服务 ──────────────────────────────────────────
 
@@ -89,7 +90,7 @@ interface HostState {
   ok: boolean;
   show: ShowStatus;
   broadcast: BroadcastStatus;
-  settings: { roomId: number | null; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
+  settings: { platform: LivePlatform; roomId: number | null; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
   stageUrl: string;
   characters: PackEntry[];
   templates: PackEntry[];
@@ -198,6 +199,15 @@ function Dot({ tone }: { tone: 'ok' | 'warn' | 'bad' | 'idle' }) {
 
 const BRAIN_TEXT = { off: '没在播', listening: '在听弹幕', thinking: '正在想', speaking: '在说话', away: '暂时走开了' } as const;
 const CONN_TEXT: Record<string, string> = { idle: '没连接', connecting: '连接中', connected: '已连上', reconnecting: '重连中', error: '连接出错' };
+
+/** 能采弹幕的平台；房间号都是直播间地址最后那串数字 */
+const POLL_PLATFORMS: ReadonlyArray<{ id: LivePlatform; name: string }> = [
+  { id: 'bilibili', name: 'B 站' },
+  { id: 'douyin', name: '抖音' },
+];
+const platformName = (id: LivePlatform) => POLL_PLATFORMS.find((p) => p.id === id)?.name ?? 'B 站';
+const roomPlaceholder = (id: LivePlatform) =>
+  id === 'douyin' ? 'live.douyin.com 后面那串数字' : 'live.bilibili.com 后面那串数字';
 
 function useBusy(): [boolean, string, (run: () => Promise<unknown>) => void] {
   const [busy, setBusy] = useState(false);
@@ -456,9 +466,20 @@ export function Console() {
             <header><h2>设置</h2><button className="dl-icon-btn" onClick={() => setDrawer(false)}>关闭</button></header>
             <h3>直播间</h3>
             <div className="dl-field">
-              <label>B 站直播间房间号</label>
+              <label>平台</label>
               <div className="dl-row">
-                <input value={room} inputMode="numeric" placeholder="直播间网址最后那串数字" onChange={(e) => setRoom(e.target.value.replace(/\D/g, ''))} />
+                {POLL_PLATFORMS.map((p) => (
+                  <button
+                    key={p.id}
+                    className={settings?.platform === p.id ? 'dl-pick dl-pick-on' : 'dl-pick'}
+                    disabled={busy || conn === 'connected'}
+                    onClick={() => choose({ platform: p.id })}
+                  >{p.name}</button>
+                ))}
+              </div>
+              <label>{platformName(settings?.platform ?? 'bilibili')}直播间房间号</label>
+              <div className="dl-row">
+                <input value={room} inputMode="numeric" placeholder={roomPlaceholder(settings?.platform ?? 'bilibili')} onChange={(e) => setRoom(e.target.value.replace(/\D/g, ''))} />
                 {conn === 'idle' || conn === 'error'
                   ? <button disabled={busy || !room} onClick={saveRoom}>连接</button>
                   : <button disabled={busy} onClick={() => run(async () => setHost(await api('disconnect', {})))}>断开</button>}
@@ -466,7 +487,13 @@ export function Console() {
               {settings?.roomId ? (
                 <label className="dl-check"><input type="checkbox" checked={settings.ownRooms.includes(settings.roomId)} onChange={(e) => choose({ ownRoom: e.target.checked })} /> 这是我自己的直播间：记住常来的观众（别人的直播间只旁观，不记）</label>
               ) : null}
-              {show?.live.state === 'connected' && !show.live.loggedIn && <p className="dl-hint">匿名连接：部分观众的名字会被 B 站打码。填上 Cookie 就能看到完整名字。</p>}
+              {show?.live.state === 'connected' && !show.live.loggedIn && (
+                <p className="dl-hint">
+                  {settings?.platform === 'douyin'
+                    ? '匿名连接：抖音只推弹幕、进场、点赞，不推礼物。填上抖音 Cookie 才能收到礼物。'
+                    : '匿名连接：部分观众的名字会被 B 站打码。填上 Cookie 就能看到完整名字。'}
+                </p>
+              )}
               {show?.live.lastError && <p className="dl-error">{show.live.lastError}</p>}
             </div>
             <h3>推流到 B 站</h3>
@@ -876,6 +903,7 @@ export const CONSOLE_CSS = `
 .dl-room button{padding:9px 14px;border-radius:12px;border:1px solid var(--dl-line);background:var(--dl-surface-2);color:var(--dl-text);font-size:13px;cursor:pointer;white-space:nowrap;transition:background .2s,border-color .2s,transform .15s}
 .dl-room button:hover:not(:disabled){background:var(--dl-hover);border-color:rgba(92,182,255,.4)}
 .dl-room button:active:not(:disabled){transform:translateY(1px) scale(.98)}
+.dl-room button.dl-pick-on{border-color:rgba(63,163,255,.65);background:rgba(63,163,255,.16);color:var(--dl-text);font-weight:650}
 .dl-room button:disabled{opacity:.4;cursor:default}
 .dl-room button.dl-done{color:light-dark(#1f9e68,#5fe0a8);border-color:rgba(95,224,168,.5)}
 .dl-room button.dl-send{min-width:64px;color:#fff;font-weight:700;background:var(--dl-blue);border-color:transparent}

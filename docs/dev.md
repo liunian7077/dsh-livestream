@@ -110,6 +110,12 @@ pnpm -C packages/dsh-livestream build      # 正式构建
 ## 排错
 
 - 舞台页 401：地址里的 `token` 不对，从控制台重新复制完整地址（端口默认 7390）。
+- 抖音连接被拒（日志里是「抖音拒绝了连接（HTTP 200，不是 101）」）：签名脚本失效了——
+  抖音改版后 `third_party/douyin-sign/sign.js` 会过期。按该目录 README 换成上游新版本，
+  同时改 `src/core/platforms/douyin/douyinSign.ts` 里的 sha256。也可以临时用
+  `DSH_DOUYIN_SIGN_FILE=<新文件路径>` 试，不用重新构建。
+- 抖音没有礼物：礼物只推给登录态的连接。控制台会提示「收不到礼物」；填一份含
+  `sessionid_ss` 的抖音 Cookie（DSH 凭据 `DOUYIN_COOKIE`）后重连。
 - 端口被占：改 `$DSH_HOME/dsh-livestream/settings.json` 里的 `stagePort`，或在控制台设置里改。
 - 侧栏没有「直播」条目、打开 DSH 报 `web boot: 1 entry did not activate` /
   `dsh-livestream: import failed: client-modules: require("fs") missed the module table`：

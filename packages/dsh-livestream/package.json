@@ -15,6 +15,7 @@
     "lib",
     "stage",
     "assets",
+    "third_party",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

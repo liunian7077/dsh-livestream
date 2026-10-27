@@ -3,7 +3,7 @@
  * 下游（注意力、记忆、舞台、控制台）只认这一套，不关心来自哪个平台。
  */
 
-export type LivePlatform = 'bilibili';
+export type LivePlatform = 'bilibili' | 'douyin';
 
 export interface LiveUser {
   /** 平台内的用户 id；平台隐藏身份时为空串 */

@@ -27,11 +27,14 @@ import { canSpeak, subtitleTimeline, synthesize, type TtsAuth } from '../body/tt
 import { DEFAULT_VOICE } from '../body/voices';
 import type { DistillLlm } from '../core/memory/distill';
 import type { CharacterManifest, GameSource } from '../stage/protocol';
+import type { LivePlatform } from '../core/live';
 import { gameRect } from '../stage/layout';
 import { connectObs, showGameSources } from '../body/obs';
 import type { OwnerPace } from '../core/attention/attention';
 
 export interface Settings {
+  /** 采集哪個平台的弹幕：B 站或抖音 */
+  platform: LivePlatform;
   roomId: number | null;
   character: string;
   template: string;
@@ -110,6 +113,8 @@ export const DEFAULT_BOARD = [
 /** 机密的名字（DSH 凭据）。豆包的和 dsh-game 共用 */
 export const SECRETS = {
   cookie: 'BILIBILI_COOKIE',
+  /** 抖音的登录 Cookie：没有它抖音只推弹幕/进场/点赞，不推礼物 */
+  douyinCookie: 'DOUYIN_COOKIE',
   ttsApiKey: 'DOUBAO_TTS_API_KEY',
   ttsAppId: 'DOUBAO_TTS_APP_ID',
   ttsAccessKey: 'DOUBAO_TTS_ACCESS_KEY',
@@ -140,6 +145,7 @@ function loadSettings(): Settings {
     // 第一次用
   }
   const settings: Settings = {
+    platform: saved.platform === 'douyin' ? 'douyin' : 'bilibili',
     roomId: null,
     character: 'dafeiyu',
     template: 'default',
@@ -316,6 +322,11 @@ export async function cookie(): Promise<string> {
   return hooks.secret(SECRETS.cookie);
 }
 
+/** 连弹幕用的 Cookie：抖音用自己那份，别把 B 站的 Cookie 发给抖音 */
+export async function cookieFor(platform: LivePlatform): Promise<string> {
+  return hooks.secret(platform === 'douyin' ? SECRETS.douyinCookie : SECRETS.cookie);
+}
+
 /** 推流到 B 站：开播拿推流码、OBS 推流、下播 */
 export const broadcast = new Broadcast({
   cookie,
@@ -336,7 +347,7 @@ export const broadcast = new Broadcast({
     updateSettings({ roomId, ownRooms: [...new Set([...settings.ownRooms, roomId])] });
     const status = show.status();
     if (status.roomId !== roomId || status.live.state === 'idle' || status.live.state === 'error') {
-      void cookie().then((c) => show.connect(roomId, c, true));
+      void cookieFor(settings.platform).then((c) => show.connect(settings.platform, roomId, c, true));
     } else {
       show.rememberViewers = true;
     }

@@ -15,7 +15,7 @@ import { LiveAttention, type OwnerPace } from '../core/attention/attention';
 import { setHerNames } from '../core/attention/features';
 import type { Topic, TopicBody } from '../core/attention/topics';
 import { LiveHub } from '../core/hub';
-import type { LiveEvent, LiveStatus, LiveUser } from '../core/live';
+import type { LiveEvent, LivePlatform, LiveStatus, LiveUser } from '../core/live';
 import { distillStream, type DistillLlm } from '../core/memory/distill';
 import { LiveMemory } from '../core/memory/memory';
 import { LiveMemoryStore } from '../core/memory/store';
@@ -224,6 +224,8 @@ export class LiveShow {
   private roomTimer: NodeJS.Timeout | null = null;
   private lastRoom = '';
   private roomId: number | null = null;
+  /** 现在连着哪个平台；观众记忆按平台分开存 */
+  private platform: LivePlatform = 'bilibili';
   private unsubscribe: (() => void) | null = null;
   /** 记住这个直播间的观众：只有主人说这是自己的直播间才记（连别人的直播间旁观时不建档） */
   rememberViewers = false;
@@ -250,11 +252,12 @@ export class LiveShow {
 
   // ── 直播间连接 ─────────────────────────────────────
 
-  connect(roomId: number, cookie: string, rememberViewers = false): LiveStatus {
+  connect(platform: LivePlatform, roomId: number, cookie: string, rememberViewers = false): LiveStatus {
     this.rememberViewers = rememberViewers;
     this.unsubscribe?.();
-    const status = this.hub.connect({ platform: 'bilibili', roomId, cookie });
+    const status = this.hub.connect({ platform, roomId, cookie });
     this.roomId = roomId;
+    this.platform = platform;
     this.unsubscribe = this.hub.subscribe((event, isUpdate) => this.observe(event, isUpdate));
     if (!this.roomTimer) this.roomTimer = setInterval(() => this.syncRoom(), 1000);
     return status;
@@ -822,17 +825,17 @@ export class LiveShow {
 
   /** 这位观众认不认识：这场里出现过，或者观众记忆里有他（私信只发给认识的人） */
   knowsViewer(uid: string): boolean {
-    return this.hub.recentEvents().some((e) => e.user.id === uid) || !!this.memory.store.getViewer('bilibili', uid);
+    return this.hub.recentEvents().some((e) => e.user.id === uid) || !!this.memory.store.getViewer(this.platform, uid);
   }
 
   /** 这位观众说过「忘了我」：不看、不记 */
   optedOut(uid: string): boolean {
-    return this.memory.store.isOptedOut('bilibili', uid);
+    return this.memory.store.isOptedOut(this.platform, uid);
   }
 
   /** 她看了这位观众的主页：自己的直播间里记一句，下次见到他卡片里会提 */
   rememberProfile(uid: string, summary: string): void {
-    if (this.memoryStream && this.memory.store.getViewer('bilibili', uid)) this.memory.store.setAppraisal('bilibili', uid, { summary, at: Date.now() });
+    if (this.memoryStream && this.memory.store.getViewer(this.platform, uid)) this.memory.store.setAppraisal(this.platform, uid, { summary, at: Date.now() });
   }
 
   /** 停下正在放的视频（她让停的、下播），不再听写后面的 */
