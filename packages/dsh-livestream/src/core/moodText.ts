@@ -7,7 +7,7 @@ export function splitByMood(text: string, moods: readonly string[]): Array<{ moo
   const parts: Array<{ mood: string; text: string }> = [];
   let mood = 'talk';
   let last = 0;
-  for (const m of text.matchAll(/[[【]\s*([a-zA-Z]+)\s*[\]】]/g)) {
+  for (const m of text.matchAll(/[[【]\s*([a-zA-Z][a-zA-Z0-9_-]*)\s*[\]】]/g)) {
     const name = m[1].toLowerCase();
     if (!moods.includes(name)) continue;
     parts.push({ mood, text: text.slice(last, m.index) });

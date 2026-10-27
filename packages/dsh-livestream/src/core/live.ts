@@ -10,6 +10,8 @@ export interface LiveUser {
   id: string;
   name: string;
   face?: string;
+  /** 抖音主页标识；与数字 UID、抖音号是不同的字段 */
+  secUid?: string;
   /** 平台把名字打了码（如 B 站未登录时的「小***」） */
   masked?: boolean;
   /** 粉丝牌：ofThisRoom 表示是本直播间主播的牌子 */

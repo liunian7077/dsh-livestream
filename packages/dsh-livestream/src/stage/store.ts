@@ -4,6 +4,8 @@
  */
 
 import type { BrainState, CharacterManifest, GameSource, GameStatus, SongPlaybackReport, StageEvent, StageFinance, StageLiveEvent, StageSongs, StageUser, TemplateManifest } from './protocol';
+import { musicHasPriority } from './protocol';
+import type { LiveConnectionState, LivePlatform } from '../core/live';
 import { viewerName } from '../core/viewerName';
 import { type FxEvent, giftTier, pick, triggersOf } from './triggers';
 
@@ -113,6 +115,8 @@ export interface StageState {
   brain: BrainState;
   brainDetail: string;
   line: Line | null;
+  /** 真实语音正在加载或播放；纯字幕不占用声音。 */
+  speaking: boolean;
   /** 最近一句说完的时刻（字幕淡出用） */
   lineEndedAt: number;
   chats: ChatRow[];
@@ -123,6 +127,10 @@ export interface StageState {
   /** 每来一次 focus 加一：卡片重新入场 */
   replySeq: number;
   online?: number;
+  roomTitle?: string;
+  roomPlatform?: LivePlatform;
+  roomConnection?: LiveConnectionState;
+  stageTitle: string;
   onAir: boolean;
   phase: ShowPhase;
   stats: ShowStats;
@@ -207,8 +215,8 @@ function startUpdating(): void {
 }
 
 let state: StageState = {
-  connected: false, character: null, template: null, brain: 'off', brainDetail: '', line: null, lineEndedAt: 0,
-  chats: [], alerts: [], focus: new Set(), reply: [], replySeq: 0, onAir: false, needsClick: false,
+  connected: false, character: null, template: null, brain: 'off', brainDetail: '', line: null, speaking: false, lineEndedAt: 0,
+  chats: [], alerts: [], focus: new Set(), reply: [], replySeq: 0, onAir: false, needsClick: false, stageTitle: '',
   phase: wasUpdating() ? 'updating' : 'waiting', stats: freshStats(), tokens: 0, model: '', finance: null, term: [], media: null, board: '', notice: '', songs: null, game: null, gameStatus: null, fx: [], reaction: null,
 };
 const subscribers = new Set<() => void>();
@@ -245,30 +253,59 @@ let audio: HTMLAudioElement | null = null;
 let audioLine: string | null = null;
 let pendingClick: (() => void) | null = null;
 
+function setSpeaking(speaking: boolean): void {
+  update((s) => ({ ...s, speaking }));
+  controlMusic?.();
+}
+
 function said(id: string): void {
   if (!preview) void fetch(`/said?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`, { method: 'POST' }).catch(() => {});
 }
 
 function endLine(id: string): void {
+  if (audioLine === id) {
+    audio?.pause();
+    audio = null;
+    audioLine = null;
+    pendingClick = null;
+    setSpeaking(false);
+    update((s) => ({ ...s, needsClick: !!pendingMusicClick }));
+  }
   update((s) => (s.line?.id === id ? { ...s, line: null, lineEndedAt: Date.now() } : s));
   said(id);
 }
 
 function onSay(event: Extract<StageEvent, { type: 'say' }>): void {
   audio?.pause();
-  const begin = (durationMs: number) => update((s) => ({ ...s, line: { id: event.id, text: event.text, mood: event.mood, startedAt: Date.now(), durationMs, timeline: event.timeline, speaker: event.speaker } }));
+  audio = null;
+  audioLine = event.id;
+  pendingClick = null;
+  update((s) => ({ ...s, needsClick: !!pendingMusicClick }));
+  const current = () => audioLine === event.id;
+  const begin = (durationMs: number) => {
+    if (current()) update((s) => ({ ...s, line: { id: event.id, text: event.text, mood: event.mood, startedAt: Date.now(), durationMs, timeline: event.timeline, speaker: event.speaker } }));
+  };
+  let fallbackStarted = false;
   const fallback = () => {
+    if (!current() || fallbackStarted) return;
+    fallbackStarted = true;
+    audio?.pause();
+    audio = null;
+    setSpeaking(false);
     begin(event.estimateMs);
     setTimeout(() => endLine(event.id), event.estimateMs);
   };
   if (!event.audio || preview) return fallback();
   const player = new Audio(`data:audio/mpeg;base64,${event.audio}`);
   audio = player;
-  audioLine = event.id;
-  player.onloadedmetadata = () => begin(Number.isFinite(player.duration) ? player.duration * 1000 : event.estimateMs);
+  setSpeaking(true);
+  player.onloadedmetadata = () => {
+    if (audio === player) begin(Number.isFinite(player.duration) ? player.duration * 1000 : event.estimateMs);
+  };
   player.onended = () => endLine(event.id);
-  player.onerror = fallback;
+  player.onerror = () => { if (audio === player) fallback(); };
   player.play().catch(() => {
+    if (!current() || audio !== player) return;
     // 普通浏览器标签页没交互过不让出声（OBS 的浏览器源可以）：先按字数走，提示点一下
     update((s) => ({ ...s, needsClick: true }));
     pendingClick = () => update((s) => ({ ...s, needsClick: false }));
@@ -304,6 +341,8 @@ export function unlockAudio(): void {
 let musicAudio: HTMLAudioElement | null = null;
 let musicSeq: number | null = null;
 let pendingMusicClick: (() => void) | null = null;
+/** 角色开口时暂停当前歌曲，说完从原位置继续。 */
+let controlMusic: (() => void) | null = null;
 let musicReports: Promise<unknown> = Promise.resolve();
 
 function stopMusic(): void {
@@ -311,6 +350,7 @@ function stopMusic(): void {
   musicAudio = null;
   musicSeq = null;
   pendingMusicClick = null;
+  controlMusic = null;
   if (player) {
     player.pause();
     player.removeAttribute('src');
@@ -344,7 +384,13 @@ function syncMusic(songs: StageSongs): void {
     musicReports = musicReports.then(() => fetch(`/music/state?${query}`, { method: 'POST', keepalive: true, signal: AbortSignal.timeout(5000) })).catch(() => {});
   };
   const play = () => {
-    if (!active()) return;
+    if (!active() || player.ended || player.error) return;
+    player.volume = state.speaking ? 0 : 1;
+    if (state.speaking) {
+      if (!player.paused) player.pause();
+      else report('paused', '主播正在说话，结束后继续播放');
+      return;
+    }
     void player.play().catch((err: Error) => {
       if (!active() || err.name === 'AbortError') return;
       if (err.name === 'NotAllowedError') {
@@ -354,6 +400,7 @@ function syncMusic(songs: StageSongs): void {
       } else report('error', `音频无法播放：${err.message}`);
     });
   };
+  controlMusic = play;
   player.onloadedmetadata = () => {
     if (!active()) return;
     if (playback.positionMs > 0 && Number.isFinite(player.duration)) {
@@ -362,13 +409,16 @@ function syncMusic(songs: StageSongs): void {
   };
   player.onplaying = () => {
     if (!active()) return;
+    if (state.speaking) { play(); return; }
     pendingMusicClick = null;
     update((s) => ({ ...s, needsClick: !!pendingClick }));
     report('playing');
   };
-  player.onwaiting = () => report('loading', '音频正在缓冲');
-  player.onstalled = () => report('loading', '音频网络连接暂时停滞，正在等待缓冲');
-  player.onpause = () => { if (!player.ended && !player.error) report('paused'); };
+  player.onwaiting = () => { if (!state.speaking) report('loading', '音频正在缓冲'); };
+  player.onstalled = () => { if (!state.speaking) report('loading', '音频网络连接暂时停滞，正在等待缓冲'); };
+  player.onpause = () => {
+    if (!player.ended && !player.error) report('paused', state.speaking ? '主播正在说话，结束后继续播放' : undefined);
+  };
   player.ontimeupdate = () => {
     if (!player.paused && !player.ended && !player.seeking && player.readyState >= 3 && Date.now() - lastProgress >= 1000) {
       lastProgress = Date.now();
@@ -595,7 +645,7 @@ function handle(event: StageEvent): void {
     case 'focus': return update((s) => ({ ...s, focus: new Set(event.userIds), reply: replyItems(event.userIds), replySeq: s.replySeq + 1 }));
     case 'room':
       roomSeen = true;
-      update((s) => ({ ...s, online: event.online, stats: { ...s.stats, peakOnline: Math.max(s.stats.peakOnline, event.online ?? 0) } }));
+      update((s) => ({ ...s, online: event.online, roomTitle: event.title, roomPlatform: event.platform, roomConnection: event.connection, stats: { ...s.stats, peakOnline: Math.max(s.stats.peakOnline, event.online ?? 0) } }));
       return onAirChanged(event.onAir);
     case 'usage':
       return update((s) => {
@@ -608,6 +658,10 @@ function handle(event: StageEvent): void {
     case 'finance': return update((s) => ({ ...s, finance: event.finance }));
     case 'media':
       if (event.action === 'play') {
+        if (musicHasPriority(state.songs?.playback)) {
+          reportMedia(event.id, 'error', undefined, '点歌优先，歌曲播放期间不能播放视频');
+          return;
+        }
         const { id, title, up, src, from, until, at } = event;
         return update((s) => term({ ...s, media: { id, title, up, src, from, until, at } }, 'video', `放视频：${short(title, 24)}`));
       }
@@ -615,8 +669,9 @@ function handle(event: StageEvent): void {
     case 'reload': location.reload(); return;
     case 'board': return update((s) => ({ ...s, board: event.text }));
     case 'notice': return update((s) => ({ ...s, notice: event.text }));
+    case 'stageTitle': return update((s) => ({ ...s, stageTitle: event.title }));
     case 'songs':
-      update((s) => ({ ...s, songs: event.songs }));
+      update((s) => ({ ...s, songs: event.songs, ...(musicHasPriority(event.songs.playback) ? { media: null } : {}) }));
       return syncMusic(event.songs);
     case 'game': return update((s) => ({ ...s, game: event.source, ...(event.source ? {} : { gameStatus: null }) }));
     case 'gameStatus': return update((s) => ({ ...s, gameStatus: event.status }));

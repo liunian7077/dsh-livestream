@@ -12,12 +12,14 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { randomUUID } from 'node:crypto';
 import { fetchProfile, profileSummary, profileText } from '../body/biliProfile';
+import { douyinProfileSummary, douyinProfileText, douyinSecUid } from '../body/douyinProfile';
 import { clock, infoText, searchText, subtitleText, type Subtitles, type VideoInfo, type VideoPart } from '../body/biliVideo';
 import { VideoNotes } from '../body/watchAlong';
 import { lookupProblem } from '../core/viewerLookup';
 import { splitByMood } from '../core/moodText';
+import { speakable } from '../core/speakable';
 import { ttsYuan, turnYuan } from '../core/cost';
-import { asr, cookie, currentMoods, dm, finance, hooks, library, markAgentReady, settings, show, social, videos } from './runtime';
+import { asr, cookie, currentMoods, currentPlatform, dm, douyinProfiles, finance, hooks, library, markAgentReady, settings, show, social, videos } from './runtime';
 import { HANDOFF_PREFIX } from '../body/show';
 import { BiliRoom } from '../body/biliRoom';
 import { screenshot } from '../body/obs';
@@ -37,6 +39,7 @@ interface AgentContext {
 const voiced = new Set<string>();
 
 const SONG_REPLY_ONLY = '这次是网易云点歌结果，只需口头回应；不要搜索、查看或播放 B 站视频，点歌失败也不要换成视频。';
+const MUSIC_PRIORITY = '现在有观众点的歌曲在播放或等待播放，歌曲优先，暂时不能放视频。等歌曲队列播放完或主人停止点歌后，再调用 play_video；不要说视频已经放上了。';
 
 const wordsOf = (event: any): string => (event?.data?.message?.content ?? [])
   .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
@@ -130,7 +133,7 @@ function watchSession(ctx: AgentContext, sessionId: string, line: 'live' | 'game
           show.unsaid(words, '交接后的回执');
           continue;
         }
-        gameWords = words.replace(/\[[a-z]+\]/g, '').trim().slice(0, 80);
+        gameWords = speakable(words).slice(0, 80);
         publishGameNow();
       }
       // 交给嘴排队念（嘴一次念一句，按交来的先后），不在这里等念完：
@@ -199,10 +202,11 @@ function seconds(value: unknown): number {
 
 /** 她说的一个人：私信过她的人、直播间里的观众（名字或 UID），或者任何 UID；认不出时返回告诉她怎么改的话 */
 function person(who: string): { uid: string; name: string } | string {
+  if (currentPlatform() !== 'bilibili') return '这个账号操作只支持 B 站，不能用于当前抖音直播间的观众。';
   const w = who.trim();
   const talker = social.findTalker(w);
   if (talker) return talker;
-  const viewer = show.lookupViewer(w);
+  const viewer = show.lookupViewer(w, 'bilibili');
   if (viewer.kind === 'found') return { uid: viewer.uid, name: viewer.user.name };
   if (/^\d{1,20}$/.test(w)) return { uid: w, name: `UID ${w}` };
   return lookupProblem(w, viewer);
@@ -309,17 +313,39 @@ export function apply(ctx: AgentContext): void {
     return () => clearInterval(timer);
   }, 'dsh-livestream session watch');
 
-  // 看观众的 B 站主页（公开信息）
+  // 主页按当前直播平台分流，不把抖音 UID 交给 B 站接口。
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'view_profile',
-    description: '看一个 B 站个人主页：等级、签名、粉丝和关注数、最近投稿、置顶视频、代表作、空间公告、有没有直播间。'
-      + '可以看观众的，也可以看你自己开播账号的。只看得到主页上公开的东西。要几秒钟。',
+    description: '看当前直播平台的公开个人主页：B 站看等级、签名、粉丝、投稿、直播间；抖音看昵称、抖音号、签名、粉丝、关注、作品和获赞数。'
+      + '可以看观众或自己。抖音通过独立的浏览器窗口读取公开资料，需要本机 Chrome 或 Edge；未登录或被验证拦截时会说明。',
     parameters: {
-      who: { type: 'string', required: true, description: '观众的名字（照消息里写的）或 UID；看你自己开播账号的主页填「自己」' },
+      who: { type: 'string', required: true, description: '观众名字（照消息里写的）或本场消息里的 UID；抖音也可填完整主页链接或 sec_uid；看自己填「自己」' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
-      const who = String(args.who ?? '');
+      const who = String(args.who ?? '').trim();
+      const platform = currentPlatform();
+      if (platform === 'douyin') {
+        const self = who === '自己';
+        const direct = douyinSecUid(who);
+        const viewer = !self ? show.lookupViewer(direct ?? who, platform) : null;
+        if (viewer && viewer.kind !== 'found' && !direct) return lookupProblem(who, viewer);
+        const found = viewer?.kind === 'found' ? viewer : null;
+        const secUid = found?.user.secUid ?? direct;
+        if (!self && !secUid) return '这位观众的消息里没有抖音主页标识（sec_uid）；请提供完整的抖音主页链接，数字 UID 或抖音号不能用来拼主页。';
+        if (found && show.optedOut(found.uid, platform)) return `${found.user.name} 说过不想被记住，他的主页就不看了。`;
+        show.toolCall('view_profile', self ? '自己的抖音主页' : found?.user.name ?? '抖音主页', '在看抖音主页');
+        try {
+          const profile = await douyinProfiles.fetch(self ? '自己' : secUid!);
+          if (found && profile.uid !== found.uid) return '抖音返回的主页与这位观众的 UID 对不上，未采用这份资料；请核对主页链接。';
+          if (show.optedOut(profile.uid, platform)) return '这位观众说过不想被记住，他的主页资料就不展示、不记了。';
+          if (!self) show.rememberProfile(profile.uid, douyinProfileSummary(profile), platform);
+          const note = found?.how === 'partial' ? `（按「${who}」找到的是 ${profile.name}；不是他的话，用 UID 或完整主页链接再查）\n` : '';
+          return (self ? '当前查询窗口登录的抖音账号（请核对是否为开播账号）：\n' : note) + douyinProfileText(profile);
+        } catch (err) {
+          return (err as Error).message;
+        }
+      }
       if (who.trim() === '自己') {
         const me = await whoIs(await cookie());
         if (!me) return '开播账号现在没登录，看不了自己的主页。';
@@ -328,9 +354,9 @@ export function apply(ctx: AgentContext): void {
         return profile ? `你自己的开播账号（${me.name}，UID ${me.uid}）：
 ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能是网络问题）。';
       }
-      const viewer = show.lookupViewer(who);
+      const viewer = show.lookupViewer(who, platform);
       if (viewer.kind !== 'found') return lookupProblem(who, viewer);
-      if (show.optedOut(viewer.uid)) return `${viewer.user.name} 说过不想被记住，他的主页就不看了。`;
+      if (show.optedOut(viewer.uid, platform)) return `${viewer.user.name} 说过不想被记住，他的主页就不看了。`;
       show.toolCall('view_profile', viewer.how === 'unseen-uid' ? `UID ${viewer.uid}` : viewer.user.name, viewer.how === 'unseen-uid' ? `在看 UID ${viewer.uid} 的主页` : `在看${viewer.user.name}的主页`);
       const profile = await fetchProfile(viewer.uid, await cookie());
       if (!profile) return viewer.how === 'unseen-uid' ? `UID ${viewer.uid} 打不开：可能没有这个用户，检查一下数字。` : `没打开 ${viewer.user.name} 的主页（B 站没返回，可能是网络问题）。`;
@@ -339,7 +365,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
         viewer.user.medal?.ofThisRoom ? `粉丝牌${viewer.user.medal.level}级` : '',
         viewer.user.isAdmin ? '房管' : '',
       ].filter(Boolean).join('，');
-      show.rememberProfile(viewer.uid, profileSummary(profile));
+      show.rememberProfile(viewer.uid, profileSummary(profile), platform);
       // 按名字的一部分找到的：告诉她是谁，对不上可以换 UID 再查
       const note = viewer.how === 'partial' ? `（按「${who}」找到的是 ${profile.name}；不是他的话，用 UID 再查）\n` : '';
       return note + profileText(profile, marks || undefined);
@@ -357,6 +383,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
+      if (currentPlatform() !== 'bilibili') return '抖音私信尚未接入，send_dm 目前只支持 B 站；没有发送任何私信。';
       const who = person(String(args.who ?? ''));
       if (typeof who === 'string') return who;
       if (show.optedOut(who.uid)) return `${who.name} 说过不想被记住，就不私信他了。`;
@@ -437,10 +464,11 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
   // 收件箱
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'check_inbox',
-    description: '看开播账号的收件箱：最近的私信会话（谁、未读几条、最后一句），和别人在评论区回复你、@ 你的。',
+    description: '看 B 站开播账号的收件箱：最近的私信会话（谁、未读几条、最后一句），和别人在评论区回复你、@ 你的。',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute() {
+      if (currentPlatform() !== 'bilibili') return '抖音收件箱尚未接入。';
       show.toolCall('check_inbox', '', '在看私信和评论回复');
       return social.inbox();
     },
@@ -448,12 +476,13 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'read_dm',
-    description: '看你和一个人最近的私信往来（他说了什么、你回了什么）。',
+    description: '看 B 站开播账号和一个人最近的私信往来（他说了什么、你回了什么）。',
     parameters: {
       who: { type: 'string', required: true, description: '名字（check_inbox 里的）或 UID' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
+      if (currentPlatform() !== 'bilibili') return '抖音私信尚未接入。';
       const who = String(args.who ?? '').trim();
       const talker = social.findTalker(who) ?? (/^\d{1,20}$/.test(who) ? { uid: who, name: `UID ${who}` } : null);
       if (!talker) {
@@ -572,6 +601,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     parameters: { page: { type: 'number', description: '第几页，默认 1' } },
     output: stringOut,
     async execute(args) {
+      if (currentPlatform() !== 'bilibili') return 'my_fans 目前只支持 B 站。';
       show.toolCall('my_fans', '', '在看新粉丝');
       return social.fans(Math.max(1, Math.floor(Number(args.page) || 1)));
     },
@@ -662,6 +692,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     parameters: { who: { type: 'string', required: true, description: '名字或 UID' } },
     output: stringOut,
     async execute(args) {
+      if (currentPlatform() !== 'bilibili') return 'unmute 目前只支持 B 站直播间。';
       const roomId = settings.roomId;
       if (!roomId) return '还不知道你的直播间是哪个（没开过播）。';
       show.toolCall('unmute', String(args.who ?? ''), '在解禁言');
@@ -675,6 +706,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     parameters: { title: { type: 'string', required: true, description: '新标题' } },
     output: stringOut,
     async execute(args) {
+      if (currentPlatform() !== 'bilibili') return 'set_live_title 目前只支持 B 站直播间。';
       const roomId = settings.roomId;
       const title = String(args.title ?? '').trim().slice(0, 40);
       if (!roomId) return '还不知道你的直播间是哪个（没开过播）。';
@@ -751,6 +783,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     description: '在直播间的舞台上放一个 B 站视频给大家看：舞台换成看视频的布局，放完换回来，放完了会告诉你。'
       + '默认从头放到结尾，可以指定从哪里开始、放多久。'
       + '放的时候你照常说话、回弹幕，你说话时视频声音会自动调小。正在放的会被换掉。'
+      + '歌曲优先于视频：有可播放的点歌时不能放视频，歌曲开始会停止当前视频。'
       + '舞台只在这个工具被调用时开始放：你说「我放一下」只是念给大家听，视频要靠这次调用才出现在舞台上。',
     parameters: {
       video: { type: 'string', required: true, description: 'BV 号、av 号或视频链接' },
@@ -761,6 +794,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
       if (show.isSongReply) return SONG_REPLY_ONLY;
+      if (show.musicHasPriority) return MUSIC_PRIORITY;
       const found = await findVideo(args.video, args.part);
       if (typeof found === 'string') return found;
       const { info, part } = found;
@@ -771,6 +805,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
       const until = asked ? Math.min(end, from + asked) : end;
       const url = await videos.playUrl(info.bvid, part.cid);
       if (!url) return `「${info.title}」在网页上放不了（B 站没给能用的播放地址：可能没有网页版、付费、番剧、充电专属或者有地区限制），换一个吧。`;
+      if (show.musicHasPriority) return MUSIC_PRIORITY;
       show.toolCall('play_video', `「${info.title.slice(0, 16)}」`);
       // 边看边聊：后台拿这段的字幕（没有就边放边听写）和原视频弹幕
       const notes = new VideoNotes(from, until, {
@@ -779,10 +814,16 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
         danmaku: () => videoDanmaku(info, part),
       }, (message) => hooks.log('warn', message));
       const view = library.view(info, part, libraryView('play', from, until));
-      const { video, replaced } = show.playVideo({ bvid: info.bvid, title: info.title, up: info.up.name, url, fromSec: from, untilSec: until }, notes,
+      const playback = show.playVideo({ bvid: info.bvid, title: info.title, up: info.up.name, url, fromSec: from, untilSec: until }, notes,
         (end) => library.finish(info, part, view, { playedSec: end.playedSec, end: end.how, said: end.said }));
+      if (!playback) {
+        library.finish(info, part, view, { playedSec: 0, end: 'song', said: [] });
+        return MUSIC_PRIORITY;
+      }
+      const { video, replaced } = playback;
       // 等舞台真的开始放：她说「放上了」时就是放上了
       const outcome = show.stage.watchers ? await show.player.waitStart(video.id, PLAY_CONFIRM_MS) : 'playing';
+      if (outcome === 'error' && video.error === '点歌优先，视频已停止') return MUSIC_PRIORITY;
       if (outcome === 'error') return `「${info.title}」没放出来（舞台加载不了这个视频${video.error ? `：${video.error}` : ''}），舞台换回了聊天的布局。可以换一个。`;
       const lines = [
         outcome === 'pending'

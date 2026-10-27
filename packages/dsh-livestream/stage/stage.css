@@ -574,16 +574,18 @@ html, body {
 .ls-enter-guard b { color: #e08a00; }
 
 /* ── 状态 ── */
-.ls-status { display: flex; align-items: center; gap: 12px; font-size: 24px; font-weight: 700; }
+.ls-status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; font-size: 24px; font-weight: 700; }
 .ls-status > span {
   display: inline-flex; align-items: center; gap: 10px; height: 54px; box-sizing: border-box; padding: 0 22px; border-radius: 999px;
   background: var(--ls-panel); border: 2px solid var(--ls-panel-border); backdrop-filter: blur(var(--ls-blur));
   box-shadow: var(--ls-shadow); color: var(--ls-text);
 }
 .ls-status > .ls-room {
+  min-width: 0; max-width: min(100%, 560px);
   height: 62px; padding: 0 28px; font-family: var(--ls-font-cute); font-size: 32px; font-weight: 900; letter-spacing: 2px; color: #fff;
   background: linear-gradient(100deg, var(--ls-accent), var(--ls-accent-2)); border-color: #fff;
 }
+.ls-room-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ls-live { font-family: var(--ls-mono); font-weight: 800; letter-spacing: 2px; color: var(--ls-dim) !important; }
 .ls-live i { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
 .ls-live.ls-on { color: #ff4d6d !important; }
@@ -628,13 +630,13 @@ html, body {
 .ls-rice-art.ls-anim, .ls-term-art.ls-anim { animation: none !important; }
 @keyframes ls-eat { 0%, 100% { transform: rotate(0); } 30% { transform: rotate(-3deg) translateY(2px) scale(1.01, 0.98); } 45% { transform: rotate(1deg); } }
 .ls-rice-body { flex: 1; min-width: 0; }
-.ls-finance-cost { margin: 4px 0 12px; font: 800 42px/1.1 var(--ls-mono); color: var(--ls-accent); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.ls-finance-total { margin: 4px 0 12px; font: 800 42px/1.1 var(--ls-mono); color: #299677; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .ls-finance-row { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-top: 9px; font-size: 21px; }
 .ls-finance-row > span { color: var(--ls-dim); }
 .ls-finance-row b { font-family: var(--ls-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .ls-finance-row b[data-low] { color: #e34e70; }
-.ls-finance-income { border-top: 1px solid color-mix(in srgb, var(--ls-dim) 18%, transparent); padding-top: 9px; }
-.ls-finance-income b { color: #299677; }
+.ls-finance-cost { border-top: 1px solid color-mix(in srgb, var(--ls-dim) 18%, transparent); padding-top: 9px; }
+.ls-finance-cost b { color: var(--ls-accent); }
 .ls-finance-sources { margin: 7px 0; font-size: 16px; color: var(--ls-dim); }
 .ls-finance-unpriced { display: block; margin-top: 4px; color: #cc7441; font-size: 16px; }
 .ls-rice-label { font-family: var(--ls-font-cute); font-size: 24px; font-weight: 700; color: var(--ls-dim); letter-spacing: 2px; }

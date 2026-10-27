@@ -64,7 +64,7 @@ function useServices(): ConsoleServices | null {
 const PRESET_ID = 'dsh-livestream';
 /** 游戏线（另一个会话里的她，专门玩游戏）用的预设 */
 const GAME_PRESET_ID = 'dsh-livestream-game';
-const SECRET_REFS = { cookie: 'BILIBILI_COOKIE', tts: 'DOUBAO_TTS_API_KEY', music: 'NETEASE_COOKIE' } as const;
+const SECRET_REFS = { cookie: 'BILIBILI_COOKIE', douyin: 'DOUYIN_COOKIE', tts: 'DOUBAO_TTS_API_KEY', music: 'NETEASE_COOKIE' } as const;
 
 interface PackEntry { id: string; name: string; builtin: boolean; canvas?: [number, number] }
 interface SpokenLine { text: string; mood: string; at: number }
@@ -95,7 +95,7 @@ interface HostState {
   ok: boolean;
   show: ShowStatus;
   broadcast: BroadcastStatus;
-  settings: { platform: LivePlatform; roomId: number | null; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; songRequest?: boolean; songQueueMax?: number; songPerUserMax?: number; initialBalanceYuan: number | null; giftPrices: GiftPrice[]; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
+  settings: { platform: LivePlatform; roomId: number | null; stageTitle: string; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; songRequest?: boolean; songQueueMax?: number; songPerUserMax?: number; initialBalanceYuan: number | null; giftPrices: GiftPrice[]; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
   finance: StageFinance;
   stageUrl: string;
   characters: PackEntry[];
@@ -237,7 +237,7 @@ function useBusy(): [boolean, string, (run: () => Promise<unknown>) => void] {
   return [busy, error, run];
 }
 
-/** 两个密钥配好没有（开播前准备清单和设置里都用）；保存后 bump 一下大家重新问 */
+/** 密钥配好没有（开播前准备清单和设置里都用）；保存后 bump 一下大家重新问 */
 let secretVersion = 0;
 const secretListeners = new Set<() => void>();
 function bumpSecrets(): void {
@@ -248,11 +248,10 @@ function bumpSecrets(): void {
 function useSecrets(): Record<string, boolean | null> {
   const creds = useCredentials();
   const version = useSyncExternalStore((l) => { secretListeners.add(l); return () => secretListeners.delete(l); }, () => secretVersion);
-  const [state, setState] = useState<Record<string, boolean | null>>({ cookie: null, tts: null, music: null });
+  const [state, setState] = useState<Record<string, boolean | null>>({ cookie: null, douyin: null, tts: null, music: null });
   useEffect(() => {
     if (!creds) return;
-    const refs = [SECRET_REFS.cookie, SECRET_REFS.tts, SECRET_REFS.music];
-    void creds.describe(refs).then((r) => setState({ cookie: !!r.value?.[SECRET_REFS.cookie]?.configured, tts: !!r.value?.[SECRET_REFS.tts]?.configured, music: !!r.value?.[SECRET_REFS.music]?.configured })).catch(() => {});
+    void creds.describe(Object.values(SECRET_REFS)).then((r) => setState(Object.fromEntries(Object.entries(SECRET_REFS).map(([key, ref]) => [key, !!r.value?.[ref]?.configured])))).catch(() => {});
   }, [creds, version]);
   return state;
 }
@@ -276,6 +275,20 @@ function SecretField({ label, ref_, hint, configured }: { label: string; ref_: s
       {error && <p className="dl-error">{error}</p>}
     </div>
   );
+}
+
+function DouyinLoginField() {
+  const [busy, error, run] = useBusy();
+  const [opened, setOpened] = useState(false);
+  return <div className="dl-field">
+    <label>抖音主页查询</label>
+    <button disabled={busy} onClick={() => run(async () => {
+      await api('douyin/login', {});
+      setOpened(true);
+    })}>{busy ? '正在打开…' : '打开抖音登录窗口'}</button>
+    <p className="dl-hint">{opened ? '窗口已打开，请在抖音窗口中完成登录或验证。' : '首次使用请在弹出的抖音窗口登录，之后会保留登录状态；电脑需已安装 Chrome 或 Edge。'}</p>
+    {error && <p className="dl-error">{error}</p>}
+  </div>;
 }
 
 /** 舞台服务器上的文件（角色插画、模板预览图）：控制台用 OBS 地址里的 token 去取 */
@@ -329,7 +342,14 @@ export function Console() {
   const endLive = () => run(async () => { await api('offair', {}); await refresh(); });
 
   const saveRoom = () => run(async () => {
-    setHost(await api('settings', { roomId: Number(room) }));
+    const input = room.trim();
+    const link = input.match(settings?.platform === 'douyin'
+      ? /^(?:https?:\/\/)?live\.douyin\.com\/(\d+)(?:[/?#].*)?$/i
+      : /^(?:https?:\/\/)?live\.bilibili\.com\/(\d+)(?:[/?#].*)?$/i);
+    const roomId = Number(/^\d+$/.test(input) ? input : link?.[1]);
+    if (!Number.isSafeInteger(roomId) || roomId <= 0) throw new Error('请输入当前平台的直播间房间号或直播链接。');
+    setHost(await api('settings', { roomId }));
+    setRoom(String(roomId));
     setHost(await api('connect', {}));
   });
 
@@ -362,7 +382,7 @@ export function Console() {
     { key: 'tts', done: secrets.tts === true, text: '豆包语音 Key', hint: '她要出声' },
     { key: 'obs', done: !!show?.stageWatchers, text: 'OBS 打开舞台', hint: '复制下面的舞台地址' },
     { key: 'room', done: conn === 'connected', text: '连上直播间', hint: '不连也能用模拟观众彩排' },
-    { key: 'cookie', done: secrets.cookie === true, text: 'B 站 Cookie', hint: '看到观众的完整名字' },
+    { key: 'cookie', done: (settings?.platform === 'douyin' ? secrets.douyin : secrets.cookie) === true, text: settings?.platform === 'douyin' ? '抖音 Cookie' : 'B 站 Cookie', hint: settings?.platform === 'douyin' ? '接收礼物消息' : '看到观众的完整名字' },
   ];
   const doneCount = steps.filter((s) => s.done).length;
 
@@ -485,6 +505,11 @@ export function Console() {
             <header><h2>设置</h2><button className="dl-icon-btn" onClick={() => setDrawer(false)}>关闭</button></header>
             <h3>直播间</h3>
             <div className="dl-field">
+              <label htmlFor="dl-stage-title">直播间显示名称</label>
+              <input id="dl-stage-title" defaultValue={settings?.stageTitle ?? ''} maxLength={40} placeholder="比如：大肥鱼的直播间" onBlur={(e) => { if (e.target.value !== settings?.stageTitle) choose({ stageTitle: e.target.value }); }} />
+              <p className="dl-hint">保存后立即更新舞台。留空时跟随已连接平台的直播标题；未连接时使用角色默认名称。</p>
+            </div>
+            <div className="dl-field">
               <label>平台</label>
               <div className="dl-row">
                 {POLL_PLATFORMS.map((p) => (
@@ -496,9 +521,9 @@ export function Console() {
                   >{p.name}</button>
                 ))}
               </div>
-              <label>{platformName(settings?.platform ?? 'bilibili')}直播间房间号</label>
+              <label>{platformName(settings?.platform ?? 'bilibili')}直播间房间号或链接</label>
               <div className="dl-row">
-                <input value={room} inputMode="numeric" placeholder={roomPlaceholder(settings?.platform ?? 'bilibili')} onChange={(e) => setRoom(e.target.value.replace(/\D/g, ''))} />
+                <input value={room} placeholder={roomPlaceholder(settings?.platform ?? 'bilibili')} onChange={(e) => setRoom(e.target.value)} />
                 {conn === 'idle' || conn === 'error'
                   ? <button disabled={busy || !room} onClick={saveRoom}>连接</button>
                   : <button disabled={busy} onClick={() => run(async () => setHost(await api('disconnect', {})))}>断开</button>}
@@ -604,6 +629,8 @@ export function Console() {
             <SecretField label="豆包语音 API Key" ref_={SECRET_REFS.tts} configured={secrets.tts} hint="火山引擎新版控制台的 API Key（和 dsh-game 共用）" />
             <LoginField />
             <SecretField label="B 站 Cookie（不想扫码时手填）" ref_={SECRET_REFS.cookie} configured={secrets.cookie} hint="浏览器里登录 B 站后复制的 Cookie；扫码登录会自动填这一项" />
+            <SecretField label="抖音 Cookie（可选）" ref_={SECRET_REFS.douyin} configured={secrets.douyin} hint="登录抖音网页版后复制 Cookie，用于弹幕采集和公开主页查询" />
+            <DouyinLoginField />
             <h3>舞台</h3>
             <div className="dl-field">
               <label>OBS 舞台地址（来源 → 浏览器 → 粘贴，宽 {canvas[0]} 高 {canvas[1]}）</label>

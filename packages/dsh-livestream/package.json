@@ -63,5 +63,8 @@
     "typescript": "6.0.3",
     "vitest": "3.2.4",
     "ws": "8.18.3"
+  },
+  "dependencies": {
+    "playwright-core": "1.64.1"
   }
 }

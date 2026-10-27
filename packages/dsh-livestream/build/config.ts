@@ -22,8 +22,8 @@ export const dev = process.argv.includes('--watch');
 /** DSH 按 package.json 的 exports 加载 lib/index.js、lib/client.js，舞台页要 /stage.js：产物扩展名固定 .js */
 const jsExtension = { js: '.js' };
 
-/** ws 的可选原生加速包：没有就用纯 JS */
-const nodeExternals = ['bufferutil', 'utf-8-validate'];
+/** ws 的可选原生加速包，以及需要保留安装目录资源的浏览器运行时。 */
+const nodeExternals = ['bufferutil', 'utf-8-validate', 'playwright-core'];
 
 /** 宿主端是 ESM，但 ws 内部要用 require */
 const createRequireBanner = "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);";
@@ -71,7 +71,7 @@ export function host(): UserConfig {
     // package.json 是 type: module，产物用 .js（DSH 按 exports 里的路径加载）
     fixedExtension: false,
     outExtensions: () => jsExtension,
-    // 依赖都打进包里（和原来一致）；只留这两个可选的原生加速包
+    // 普通依赖打进包里；浏览器运行时按需加载，保留自己的目录资源。
     deps: { neverBundle: nodeExternals, onlyBundle: false },
     banner: { js: createRequireBanner },
     // 共用的运行时（runtime.ts 的单例状态）拆进 lib/chunks/

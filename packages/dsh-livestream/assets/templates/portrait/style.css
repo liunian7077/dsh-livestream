@@ -1,4 +1,4 @@
-/* 海边小屋的 1080 × 1920 竖屏舞台。 */
+/* 1080 × 1920 竖屏：日常聊天用方案 B，视频陪看用方案 D。 */
 .ls-template-portrait .ls-backdrop {
   background: #f6efe4 url("room.jpg") 54% center / cover no-repeat;
 }
@@ -13,36 +13,87 @@
   box-shadow: inset 0 0 160px rgba(112, 91, 66, .12);
 }
 .ls-template-portrait .ls-slot-status { z-index: 8; }
-.ls-template-portrait .ls-status { gap: 10px; font-size: 22px; flex-wrap: wrap; }
-.ls-template-portrait .ls-status > span { padding: 10px 18px; }
-.ls-template-portrait .ls-ai-label { font-size: 21px; }
+.ls-template-portrait .ls-status {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center; gap: 10px; font-size: 22px;
+}
+.ls-template-portrait .ls-status > span { height: 58px; padding: 0 14px; gap: 8px; white-space: nowrap; }
+.ls-template-portrait .ls-status > .ls-room { max-width: none; height: 72px; padding: 0 22px; font-size: 32px; letter-spacing: 1px; }
+.ls-template-portrait .ls-online svg { width: 24px; height: 24px; }
+.ls-template-portrait .ls-online small { font-size: 20px; }
+.ls-template-portrait .ls-brain { min-width: 0; max-width: 230px; }
+.ls-template-portrait .ls-brain-icon { flex: none; }
+.ls-template-portrait .ls-brain-text { overflow: hidden; text-overflow: ellipsis; }
+.ls-template-portrait .ls-status > .ls-offline { grid-column: 1 / -1; justify-self: start; height: 40px; font-size: 20px; }
 .ls-template-portrait .ls-slot-board,
 .ls-template-portrait .ls-slot-rice { z-index: 2; }
-.ls-template-portrait .ls-board-compact .ls-board-head { font-size: 21px; }
-.ls-template-portrait .ls-board-compact .ls-board-title { font-size: 25px; }
-.ls-template-portrait .ls-board-compact .ls-board-page li { font-size: 21px; }
-.ls-template-portrait .ls-rice { min-height: 0; padding: 20px; border-radius: 28px; }
+.ls-template-portrait .ls-board { border-radius: 34px; background: rgba(255, 252, 250, .94); }
+.ls-template-portrait .ls-board-compact .ls-board-head { padding: 22px 30px 8px; font-size: 28px; letter-spacing: 0; }
+.ls-template-portrait .ls-board-compact .ls-board-page { min-width: 0; padding: 4px 30px 28px; }
+.ls-template-portrait .ls-board-compact .ls-board-title { margin-bottom: 10px; font-size: 32px; line-height: 1.3; overflow-wrap: anywhere; }
+.ls-template-portrait .ls-board-compact .ls-board-page li { padding-left: 20px; font-size: 24px; line-height: 1.5; overflow-wrap: anywhere; }
+.ls-template-portrait.ls-mode-chat .ls-board-page ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px; }
+.ls-template-portrait.ls-mode-chat .ls-board-page li:first-child { grid-column: 1 / -1; }
+.ls-template-portrait .ls-board-dots { right: 22px; bottom: 10px; }
+.ls-template-portrait .ls-rice { height: 100%; min-height: 0; padding: 20px 28px 24px; border-radius: 34px; }
 .ls-template-portrait .ls-rice-art { display: none; }
-.ls-template-portrait .ls-rice-label { font-size: 21px; letter-spacing: 0; }
-.ls-template-portrait .ls-rice-count b { font-size: 46px; }
-.ls-template-portrait .ls-rice-count span { font-size: 24px; }
-.ls-template-portrait .ls-rice-note { font-size: 17px; }
-.ls-template-portrait .ls-finance-cost { font-size: 36px; }
-.ls-template-portrait .ls-finance-row { font-size: 20px; }
+.ls-template-portrait .ls-rice-body { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: auto auto; column-gap: 24px; }
+.ls-template-portrait .ls-rice-label { grid-column: 1; grid-row: 1; font-size: 22px; letter-spacing: 0; }
+.ls-template-portrait .ls-finance-total { grid-column: 1; grid-row: 2; margin: 6px 0 0; font-size: 38px; }
+.ls-template-portrait .ls-finance-row {
+  grid-column: 2; grid-row: 1 / 3; display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-start;
+  margin: 0; padding: 0 0 0 28px; gap: 6px; border: 0; border-left: 2px solid #e7edf4; font-size: 22px;
+}
+.ls-template-portrait .ls-finance-row b { font-size: 38px; line-height: 1.1; }
+.ls-template-portrait .ls-finance-cost { grid-column: 3; }
+.ls-template-portrait .ls-finance-cost b { font-size: 34px; }
+.ls-template-portrait .ls-finance-sources,
+.ls-template-portrait .ls-rice-note { display: none; }
+.ls-template-portrait .ls-finance-unpriced { position: absolute; right: 24px; bottom: 4px; font-size: 16px; }
+.ls-template-portrait.ls-mode-video .ls-rice { padding: 18px 22px; border-radius: 28px; }
+.ls-template-portrait.ls-mode-video .ls-rice-body { column-gap: 10px; }
+.ls-template-portrait.ls-mode-video .ls-rice-label { font-size: 20px; }
+.ls-template-portrait.ls-mode-video .ls-finance-row { padding-left: 14px; font-size: 20px; }
+.ls-template-portrait.ls-mode-video .ls-finance-total,
+.ls-template-portrait.ls-mode-video .ls-finance-row b { font-size: 28px; }
+.ls-template-portrait.ls-mode-video .ls-finance-cost b { font-size: 24px; }
+.ls-template-portrait.ls-mode-chat .ls-slot-character,
+.ls-template-portrait.ls-mode-video .ls-slot-character { display: flex; justify-content: center; align-items: flex-end; }
+.ls-template-portrait.ls-mode-chat .ls-character,
+.ls-template-portrait.ls-mode-video .ls-character { width: auto; height: 100%; max-width: 100%; }
+/* Q 版片段的透明留白较多，按可见人物补偿大小与脚底位置。 */
+.ls-template-portrait.ls-mode-chat .ls-character[data-character="dafeiyu-chibi"] { height: 900px; max-width: none; flex-shrink: 0; transform: translateY(72px); }
+.ls-template-portrait.ls-mode-video .ls-character[data-character="dafeiyu-chibi"] { height: 640px; max-width: none; flex-shrink: 0; transform: translateY(52px); }
 .ls-template-portrait .ls-slot-subtitle { z-index: 5; }
 .ls-template-portrait .ls-slot-terminal { display: none; }
 .ls-template-portrait .ls-slot-alerts { z-index: 6; }
 .ls-template-portrait .ls-term-art { display: none; }
-.ls-template-portrait .ls-subtitle { padding: 28px 36px; }
-.ls-template-portrait .ls-term { padding: 22px 30px; }
-.ls-template-portrait .ls-chat-head { padding: 12px 24px 8px; font-size: 26px; }
+.ls-template-portrait .ls-subtitle {
+  --ls-sub-bg: rgba(255, 255, 255, .95); --ls-sub: #34405e;
+  box-sizing: border-box; padding: 10px 30px; border-left: 8px solid #76b7ff; border-radius: 34px;
+  box-shadow: 0 16px 40px -24px rgba(54, 83, 131, .5);
+}
+.ls-template-portrait.ls-mode-chat .ls-subtitle,
+.ls-template-portrait.ls-mode-video .ls-subtitle { min-height: 100%; display: flex; flex-direction: column; justify-content: center; }
+.ls-template-portrait .ls-subtitle p { line-height: 1.35; letter-spacing: 1px; }
+.ls-template-portrait .ls-speaker {
+  position: static; display: flex; width: fit-content; gap: 8px; margin-bottom: 2px; padding: 0;
+  background: none; box-shadow: none; font: 600 20px/1.1 var(--ls-font); letter-spacing: 0; color: #459fe7;
+}
+.ls-template-portrait .ls-lit,
+.ls-template-portrait .ls-em.ls-lit { color: #34405e; text-shadow: none; }
+.ls-template-portrait .ls-pages { right: 20px; bottom: 8px; }
+.ls-template-portrait .ls-pages b { width: 6px; height: 6px; background: #d8e9fb; }
+.ls-template-portrait .ls-pages b.ls-on { background: var(--ls-accent); }
+.ls-template-portrait .ls-chat-head { padding: 16px 24px 6px; font-size: 28px; }
 .ls-template-portrait .ls-chat-list {
-  padding: 8px 24px 16px; gap: 12px;
+  padding: 8px 24px 16px; gap: 10px;
   justify-content: safe flex-end; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
   mask-image: none; -webkit-mask-image: none;
 }
 .ls-template-portrait .ls-chat-body { flex-direction: row; align-items: flex-start; gap: 12px; }
-.ls-template-portrait .ls-chat-name { flex: 0 0 auto; max-width: 152px; flex-wrap: wrap; gap: 4px; margin: 0; padding-top: 9px; }
+.ls-template-portrait .ls-chat-row > .ls-avatar { width: 42px; height: 42px; font-size: 20px; }
+.ls-template-portrait .ls-chat-name { flex: 0 0 auto; max-width: 132px; flex-wrap: wrap; gap: 4px; margin: 0; padding-top: 9px; font-size: 20px; }
 .ls-template-portrait .ls-chat-name .ls-name { flex: none; white-space: nowrap; }
 .ls-template-portrait .ls-chat-text {
   flex: 1; min-width: 0; padding: 8px 14px;
@@ -51,32 +102,40 @@
 .ls-template-portrait .ls-playlist {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
-  grid-template-areas: "head head" "now next" "now queue" "playback queue" "foot foot";
-  padding: 22px 28px 18px;
-  gap: 10px 28px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "head head" "now next" "now queue" "playback queue";
+  padding: 12px 24px;
+  gap: 4px 32px;
 }
 .ls-template-portrait .ls-playlist-head { grid-area: head; }
-.ls-template-portrait .ls-song-now { grid-area: now; }
+.ls-template-portrait .ls-song-now { grid-area: now; align-self: center; min-height: 0; gap: 14px; }
+.ls-template-portrait .ls-song-disc { width: 56px; height: 56px; }
+.ls-template-portrait .ls-song-info { gap: 2px; }
 .ls-template-portrait .ls-song-playback { grid-area: playback; }
 .ls-template-portrait .ls-playlist-next { grid-area: next; }
 .ls-template-portrait .ls-playlist-list { grid-area: queue; }
-.ls-template-portrait .ls-playlist-foot { grid-area: foot; }
+.ls-template-portrait .ls-playlist-foot { display: none; }
 .ls-template-portrait .ls-playlist-empty { grid-area: queue; font-size: 22px; }
-.ls-template-portrait .ls-song-detail { font-size: 18px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.ls-template-portrait .ls-playlist-head h2 { font-size: 28px; }
+.ls-template-portrait .ls-song-detail { max-height: 24px; overflow-y: auto; font-size: 16px; }
+.ls-template-portrait .ls-playlist:has(.ls-song-detail) .ls-song-disc,
+.ls-template-portrait .ls-playlist:has(.ls-song-detail) .ls-song-artist { display: none; }
+.ls-template-portrait .ls-playlist:has(.ls-song-detail) .ls-song-name { font-size: 24px; }
+.ls-template-portrait .ls-playlist:has(.ls-song-detail) .ls-song-label { font-size: 14px; }
+.ls-template-portrait .ls-playlist:has(.ls-song-detail) .ls-song-playback { gap: 4px; }
+.ls-template-portrait .ls-playlist-head h2 { font-size: 26px; }
 .ls-template-portrait .ls-playlist-head > span,
-.ls-template-portrait .ls-song-artist { font-size: 22px; }
-.ls-template-portrait .ls-song-name { font-size: 34px; }
-.ls-template-portrait .ls-song-meta,
-.ls-template-portrait .ls-song-label { font-size: 20px; }
-.ls-template-portrait .ls-playlist-next { font-size: 22px; }
+.ls-template-portrait .ls-song-artist { font-size: 18px; }
+.ls-template-portrait .ls-song-name { font-size: 30px; line-height: 1.15; }
+.ls-template-portrait .ls-song-meta { font-size: 16px; }
+.ls-template-portrait .ls-song-label { font-size: 16px; }
+.ls-template-portrait .ls-playlist-next { padding-top: 2px; font-size: 18px; }
 .ls-template-portrait .ls-playlist-next > span { display: none; }
-.ls-template-portrait .ls-song-queued > strong { font-size: 25px; }
+.ls-template-portrait .ls-playlist-list > li { min-height: 36px; padding: 2px 0; }
+.ls-template-portrait .ls-song-queued { flex-direction: row; align-items: baseline; gap: 8px; }
+.ls-template-portrait .ls-song-queued > strong { font-size: 22px; }
 .ls-template-portrait .ls-song-queued > span,
-.ls-template-portrait .ls-song-by { font-size: 19px; }
-.ls-template-portrait .ls-playlist-foot { font-size: 19px; }
-.ls-template-portrait .ls-song-by { max-width: 160px; }
+.ls-template-portrait .ls-song-by { font-size: 16px; }
+.ls-template-portrait .ls-song-by { max-width: 132px; }
 
 /* 等待、更新、开场和谢幕也使用竖屏构图。 */
 .ls-template-portrait .ls-scene-bg { object-position: 65% center; }
@@ -91,4 +150,5 @@
 .ls-template-portrait .ls-end-card { left: 64px; top: 51%; width: 952px; padding: 44px; }
 .ls-template-portrait .ls-end-stats { grid-template-columns: repeat(2, 1fr); }
 .ls-template-portrait .ls-end-art { width: 300px; left: auto; top: auto; right: 50px; bottom: 70px; }
+.ls-template-portrait .ls-notice { top: 0; bottom: auto; height: 58px; box-shadow: 0 4px 16px rgba(40, 70, 130, .18); }
 .ls-template-portrait .ls-notice-track span { font-size: 26px; }

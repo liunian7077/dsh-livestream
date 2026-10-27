@@ -9,7 +9,7 @@
  * 被平台打码的名字（匿名连接时的「小***」）找不到 UID；控制台模拟的观众没有真账号。
  */
 
-import type { LiveEvent, LiveUser } from './live';
+import type { LiveEvent, LivePlatform, LiveUser } from './live';
 import { cleanName } from './safety';
 
 export type ViewerLookup =
@@ -22,6 +22,7 @@ export type ViewerLookup =
 export interface LookupOptions {
   /** 模拟观众的 uid 前缀 */
   simulatedPrefix: string;
+  platform?: LivePlatform;
 }
 
 const MAX_LISTED = 5;
@@ -46,8 +47,12 @@ export function lookupViewer(who: string, events: readonly LiveEvent[], options:
   // 每位观众留最近的一次（同一个人改过名，以最新的为准）
   const viewers = new Map<string, LiveUser>();
   for (const e of [...events].reverse()) {
+    if (options.platform && e.platform !== options.platform) continue;
     const key = usable(e.user) ? e.user.id : `masked:${e.user.name}`;
-    if (!viewers.has(key)) viewers.set(key, e.user);
+    const recent = viewers.get(key);
+    if (!recent) viewers.set(key, { ...e.user });
+    // 同一位观众的部分消息不带主页标识，保留较早消息里的标识。
+    else if (!recent.secUid && e.user.secUid) recent.secUid = e.user.secUid;
   }
   const all = [...viewers.values()];
   const listed = (users: LiveUser[]) => users.filter(usable).slice(0, MAX_LISTED).map((u) => ({ uid: u.id, name: cleanName(u.name) }));
@@ -58,7 +63,7 @@ export function lookupViewer(who: string, events: readonly LiveEvent[], options:
   };
   if (!target) return { kind: 'missing', suggestions: listed(all) };
 
-  const byUid = all.find((u) => u.id === target);
+  const byUid = all.find((u) => u.id === target || (options.platform === 'douyin' && u.secUid === target));
   if (byUid) return result(byUid, 'uid');
 
   const exact = all.filter((u) => u.name === target || cleanName(u.name) === target);
@@ -73,7 +78,7 @@ export function lookupViewer(who: string, events: readonly LiveEvent[], options:
   if (partial.length > 1) return { kind: 'ambiguous', candidates: listed(partial) };
 
   // 直接给了 UID，但这场里没见过（主人让她看某个人）
-  if (/^\d{1,20}$/.test(target)) return { kind: 'found', uid: target, user: { id: target, name: target }, how: 'unseen-uid' };
+  if (options.platform !== 'douyin' && /^\d{1,20}$/.test(target)) return { kind: 'found', uid: target, user: { id: target, name: target }, how: 'unseen-uid' };
 
   const ranked = all
     .map((u) => ({ u, score: likeness(cleanName(u.name), target) }))
@@ -88,9 +93,9 @@ export function lookupProblem(who: string, lookup: Exclude<ViewerLookup, { kind:
   const list = (items: Array<{ uid: string; name: string }>) => items.map((c) => `${c.name}（UID ${c.uid}）`).join('、');
   switch (lookup.kind) {
     case 'simulated':
-      return `${lookup.name} 是主人在控制台里模拟的观众（彩排用），没有真的 B 站账号。`;
+      return `${lookup.name} 是主人在控制台里模拟的观众（彩排用），没有真实的平台账号。`;
     case 'masked':
-      return `「${lookup.name}」的名字被 B 站打了码（直播间没用登录账号连接），看不到他是谁，没法查。`;
+      return `「${lookup.name}」的身份被平台隐藏了，看不到他是谁，没法查。`;
     case 'ambiguous':
       return `「${who}」对得上好几位观众：${list(lookup.candidates)}。是哪一位？用他的 UID 再填一次。`;
     case 'missing':

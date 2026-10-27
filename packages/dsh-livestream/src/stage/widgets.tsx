@@ -5,7 +5,7 @@
 
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CharacterManifest, StageLiveEvent, StageUser } from './protocol';
-import { SONG_PLAYBACK_LABELS } from './protocol';
+import { musicHasPriority, SONG_PLAYBACK_LABELS } from './protocol';
 import { assetUrl, dropAlert, energy, riceOf, getState, litChars, mediaUrl, preview, reportMedia, subscribe, type Alert, type ReplyItem, type StageState } from './store';
 import { giftTier } from './triggers';
 import { clipBox, clipVideoStyle } from './layout';
@@ -56,8 +56,8 @@ function Halo() {
 export function Character() {
   const { character } = useStage();
   if (!character) return null;
-  if (character.renderer === 'clips' && character.clips) return <ClipCharacter character={character} />;
-  if (character.renderer === 'image' && character.image) return <ImageCharacter character={character} />;
+  if (character.renderer === 'clips' && character.clips) return <ClipCharacter key={character.id} character={character} />;
+  if (character.renderer === 'image' && character.image) return <ImageCharacter key={character.id} character={character} />;
   return null;
 }
 
@@ -108,16 +108,18 @@ function ClipCharacter({ character }: { character: CharacterManifest }) {
   const [w, h] = clipBox(clips);
   const videoStyle = clipVideoStyle(clips.size, clips.frame);
   return (
-    <div className={`ls-character${line ? ' ls-speaking' : ''}`} data-mood={line?.mood || undefined} style={{ aspectRatio: `${w} / ${h}` }}>
+    <div className={`ls-character${line ? ' ls-speaking' : ''}`} data-character={character.id} data-mood={line?.mood || undefined} style={{ aspectRatio: `${w} / ${h}` }}>
       <Halo />
-      <ClipPlayer src={(name) => assetUrl('characters', character.id, name)} name={queue[0]} loop={queue.length <= 1} onEnded={next} names={allClips(character)} graph={graph} videoStyle={videoStyle} />
+      <ClipPlayer src={(name) => assetUrl('characters', character.id, name)} name={queue[0]} loop={queue.length <= 1} onEnded={next} names={warmClips(character)} graph={graph} videoStyle={videoStyle} />
     </div>
   );
 }
 
-function allClips(c: CharacterManifest): string[] {
+/** 只预热循环、基础表情与自动反应；其余动作首次使用时由 video 按需加载。 */
+function warmClips(c: CharacterManifest): string[] {
   const clips = c.clips!;
-  return [clips.idle, clips.talk, clips.out, clips.in, ...Object.values(clips.moods), ...Object.values(clips.talkMoods ?? {})].filter((n): n is string => !!n);
+  const common = ['laugh', 'shy', 'shocked', 'scared', 'sad', 'angry', 'think', ...Object.values(c.reactions ?? {})];
+  return [...new Set([clips.idle, clips.talk, clips.out, clips.in, ...common.map((m) => clips.moods[m]), ...Object.values(clips.talkMoods ?? {})].filter((n): n is string => !!n))];
 }
 
 /** 片段先整段下载进内存，切换表情时不再等网络 */
@@ -525,11 +527,14 @@ export function Game() {
 
 /**
  * 主人想让观众知道的（控制台里写）：空行分页，每页第一行是标题、后面一行一条。几页轮着放。
- * options：title（面板头上的字，默认「告示板」，false 不要）、seconds（每页停几秒，默认 12）
+ * options：title（面板头上的字，默认「告示板」，false 不要）、seconds（每页停几秒，默认 12）、strip（每行单独轮播）
  */
 export function Board({ options }: { options?: Record<string, unknown> }) {
   const { board } = useStage();
-  const pages = useMemo(() => board.split(/\n\s*\n/).map((p) => p.split('\n').map((l) => l.trim()).filter(Boolean)).filter((p) => p.length), [board]);
+  const pages = useMemo(() => {
+    const groups = board.split(/\n\s*\n/).map((p) => p.split('\n').map((l) => l.trim()).filter(Boolean)).filter((p) => p.length);
+    return options?.strip ? groups.flatMap((lines) => lines.map((line) => [line])) : groups;
+  }, [board, options?.strip]);
   const [page, setPage] = useState(0);
   const seconds = Number(options?.seconds ?? 12);
   useEffect(() => {
@@ -546,7 +551,7 @@ export function Board({ options }: { options?: Record<string, unknown> }) {
       {title !== false && <div className="ls-board-head"><span>{String(title)}</span></div>}
       <div className="ls-board-page" key={`${page}-${board.length}`}>
         <div className="ls-board-title">{heading}</div>
-        <ul>{items.map((item, i) => <li key={i}>{item}</li>)}</ul>
+        {items.length > 0 && <ul>{items.map((item, i) => <li key={i}>{item}</li>)}</ul>}
       </div>
       {pages.length > 1 && <div className="ls-board-dots">{pages.map((_, i) => <i key={i} className={i === page % pages.length ? 'ls-on' : ''} />)}</div>}
     </div>
@@ -710,16 +715,19 @@ export function Alerts({ options }: { options?: Record<string, unknown> }) {
 // ── 状态 ─────────────────────────────────────────────
 
 const BRAIN_TEXT = { off: '', listening: '在听弹幕', thinking: '正在想…', speaking: '在说话', away: '暂时走开了' } as const;
+const ROOM_CONNECTION_TEXT = { idle: '未连接', connecting: '连接中', connected: '等待人数', reconnecting: '重连中', error: '连接出错' } as const;
 
 /** options.room：最前面加一块「××的直播间」名牌 */
 export function Status({ options }: { options?: Record<string, unknown> }) {
-  const { brain, brainDetail, online, onAir, character, connected } = useStage();
+  const { brain, brainDetail, online, onAir, character, connected, stageTitle, roomTitle, roomPlatform, roomConnection } = useStage();
+  const title = stageTitle || (typeof options?.room === 'string' ? options.room : '') || roomTitle || `${character?.name ?? ''}的直播间`;
+  const hasOnline = connected && (!roomConnection || roomConnection === 'connected') && online !== undefined;
   return (
     <div className={`ls-status ls-brain-${brain}`}>
-      {options?.room ? <span className="ls-room">{typeof options.room === 'string' ? options.room : `${character?.name ?? ''}的直播间`}</span> : null}
+      {options?.room ? <span className="ls-room" title={title}><b className="ls-room-title">{title}</b></span> : null}
       <span className={`ls-live${onAir ? ' ls-on' : ''}`}><i />{onAir ? 'LIVE' : '准备中'}</span>
-      {online !== undefined && <span className="ls-online"><EyeIcon />{online}<small>人在看</small></span>}
-      {brain !== 'off' && <span className="ls-brain" key={brain}><i className="ls-brain-icon"><b /><b /><b /></i>{character?.name ?? ''}{brain === 'thinking' && brainDetail ? brainDetail : BRAIN_TEXT[brain]}</span>}
+      {(roomPlatform || online !== undefined) && <span className="ls-online"><EyeIcon />{roomPlatform && <small>{roomPlatform === 'douyin' ? '抖音' : 'B 站'}</small>}{hasOnline ? <>{online.toLocaleString()}<small>人在看</small></> : <small>{connected ? ROOM_CONNECTION_TEXT[roomConnection ?? 'idle'] : '等待连接'}</small>}</span>}
+      {brain !== 'off' && <span className="ls-brain" key={brain}><i className="ls-brain-icon"><b /><b /><b /></i><span className="ls-brain-text" title={brainDetail || undefined}>{!options?.compact && (character?.name ?? '')}{brain === 'thinking' && brainDetail ? brainDetail : BRAIN_TEXT[brain]}</span></span>}
       {!connected && <span className="ls-offline">舞台没连上</span>}
     </div>
   );
@@ -800,10 +808,10 @@ export function Rice() {
   return (
     <section className="ls-rice" aria-label="今日收支">
       <div className="ls-rice-body">
-        <div className="ls-rice-label">今天用了</div>
-        <div className="ls-finance-cost">{ready ? yuan(finance.todayCostYuan, 4) : '等待同步'}</div>
+        <div className="ls-rice-label">今日进账</div>
+        <div className="ls-finance-total">{ready ? yuan(finance.todayGiftYuan + finance.todayChatGiftYuan) : '等待同步'}</div>
         <div className="ls-finance-row"><span>我的余额</span><b data-low={ready && finance.balanceYuan !== null && finance.balanceYuan < 1 ? '' : undefined}>{!ready ? '—' : finance.balanceYuan === null ? '未设置' : yuan(finance.balanceYuan)}</b></div>
-        <div className="ls-finance-row ls-finance-income"><span>今天要饭赚了</span><b>{ready ? yuan(finance.todayGiftYuan + finance.todayChatGiftYuan) : '—'}</b></div>
+        <div className="ls-finance-row ls-finance-cost"><span>今日消耗</span><b>{ready ? yuan(finance.todayCostYuan, 4) : '—'}</b></div>
         {ready && <div className="ls-finance-sources">礼物 {yuan(finance.todayGiftYuan)} · 弹幕 {yuan(finance.todayChatGiftYuan)}</div>}
         <div className="ls-rice-note">{ready ? `${finance.todayTokens.toLocaleString()} token · 估算` : 'DeepSeek V4.1 Flash'}</div>
         {ready && finance.unpricedTokens > 0 && <small className="ls-finance-unpriced">另有用量未计价</small>}
@@ -862,7 +870,7 @@ function useClock(): string {
 }
 
 function Waiting() {
-  const { character, online } = useStage();
+  const { character, online, connected, stageTitle, roomTitle } = useStage();
   const bg = useArt('waiting');
   const sticker = useArt('sleep');
   const time = useClock();
@@ -872,10 +880,10 @@ function Waiting() {
       {bg && <ArtImg className="ls-scene-bg" src={bg} />}
       <div className="ls-wait-card">
         {sticker && <ArtImg className="ls-wait-art" src={sticker} />}
-        <div className="ls-wait-room">{name}的直播间</div>
+        <div className="ls-wait-room">{stageTitle || roomTitle || `${name}的直播间`}</div>
         <div className="ls-wait-title">直播马上开始<i /><i /><i /></div>
         <div className="ls-wait-hint">弹幕里叫「{name}」，她会回你哦</div>
-        <div className="ls-wait-meta"><span>{time}</span>{online ? <span>{online} 人在等</span> : null}</div>
+        <div className="ls-wait-meta"><span>{time}</span>{connected && online !== undefined ? <span>{online.toLocaleString()} 人在等</span> : null}</div>
       </div>
     </div>
   );
@@ -883,7 +891,7 @@ function Waiting() {
 
 /** 直播中插件在更新：观众看到的是「更新中」，不是「马上开始」（直播没断，等一下就回来） */
 function Updating() {
-  const { character } = useStage();
+  const { character, stageTitle, roomTitle } = useStage();
   // 角色包里没有更新专用的画（art.updating）就借等待画面的；小人借敲电脑的那张
   const [updating, waiting, updatingSticker, laptop] = [useArt('updating'), useArt('waiting'), useArt('updating-sticker'), useArt('laptop')];
   const bg = updating ?? waiting;
@@ -894,7 +902,7 @@ function Updating() {
       {bg && <ArtImg className="ls-scene-bg" src={bg} />}
       <div className="ls-wait-card">
         {sticker && <ArtImg className="ls-wait-art ls-update-art" src={sticker} />}
-        <div className="ls-wait-room">{name}的直播间</div>
+        <div className="ls-wait-room">{stageTitle || roomTitle || `${name}的直播间`}</div>
         <div className="ls-wait-title">{name}在升级<i /><i /><i /></div>
         <div className="ls-wait-hint">主人在给她装新功能，直播没断，一会儿就回来</div>
       </div>
@@ -992,19 +1000,25 @@ export function Scene() {
 const CATCHUP_SEC = 3;
 
 /**
- * 她在放的视频（只出现在模板的 video 布局里）。她说话时声音调小，放到 until 秒或放完回执给身体。
- * options：duck（她说话时的音量，默认 0.25）、caption（顶上写片名，默认开）
+ * 她在放的视频（只出现在模板的 video 布局里）。歌曲会停掉视频；她说话时压低视频声音。
+ * options：duck（她说话时的音量，默认且最高 0.15）、caption（顶上写片名，默认开）
  */
 export function Video({ options }: { options?: Record<string, unknown> }) {
-  const { media, line } = useStage();
+  const { media } = useStage();
   const ref = useRef<HTMLVideoElement>(null);
-  const speaking = !!line;
 
   useEffect(() => {
     const video = ref.current;
     if (!video || !media) return;
     let done = false;
     let started = false;
+    const configuredDuck = Number(options?.duck ?? 0.15);
+    const duck = Number.isFinite(configuredDuck) ? Math.min(0.15, Math.max(0, configuredDuck)) : 0.15;
+    const musicActive = () => musicHasPriority(getState().songs?.playback);
+    const syncSound = () => {
+      video.volume = getState().speaking ? duck : 1;
+      if (musicActive()) video.pause();
+    };
     const finish = (state: 'ended' | 'error', detail?: string) => {
       if (done) return;
       done = true;
@@ -1013,16 +1027,22 @@ export function Video({ options }: { options?: Record<string, unknown> }) {
     };
     const elapsed = (Date.now() - media.at) / 1000;
     const start = media.from + (elapsed > CATCHUP_SEC ? elapsed : 0);
-    if (start >= media.until) return;
+    if (start >= media.until) { finish('ended'); return; }
+    // store 通知同步执行：先停视频，再创建歌曲 Audio，避免 React 切布局期间同时出声。
+    const unsubscribe = subscribe(syncSound);
     const onMeta = () => {
+      if (done || musicActive()) return;
       video.currentTime = start;
+      syncSound();
       // 普通浏览器标签页没交互过不让出声：先静音放着（OBS 的浏览器源可以出声）
-      void video.play().catch(() => {
+      void video.play().catch((err: Error) => {
+        if (done || musicActive() || err.name === 'AbortError') return;
         video.muted = true;
         void video.play().catch((err: Error) => finish('error', `play() ${err.name}: ${err.message}`));
       });
     };
     const onPlaying = () => {
+      if (musicActive()) { video.pause(); return; }
       if (started) return;
       started = true;
       reportMedia(media.id, 'playing', video.currentTime);
@@ -1037,8 +1057,11 @@ export function Video({ options }: { options?: Record<string, unknown> }) {
     video.addEventListener('ended', onEnded);
     video.addEventListener('error', onError);
     video.muted = preview;
+    syncSound();
     video.src = mediaUrl(media.src);
     return () => {
+      done = true;
+      unsubscribe();
       video.removeEventListener('loadedmetadata', onMeta);
       video.removeEventListener('playing', onPlaying);
       video.removeEventListener('timeupdate', onTime);
@@ -1048,20 +1071,7 @@ export function Video({ options }: { options?: Record<string, unknown> }) {
       video.removeAttribute('src');
       video.load();
     };
-  }, [media?.id]);
-
-  // 她说话时把视频声音慢慢压下去，说完慢慢回来。用定时器不用 requestAnimationFrame：页面不在前台时那个会停，音量就卡在半路
-  useEffect(() => {
-    const video = ref.current;
-    if (!video) return;
-    const target = speaking ? Number(options?.duck ?? 0.25) : 1;
-    const timer = setInterval(() => {
-      const next = video.volume + (target - video.volume) * 0.18;
-      video.volume = Math.abs(target - next) < 0.01 ? target : next;
-      if (video.volume === target) clearInterval(timer);
-    }, 30);
-    return () => clearInterval(timer);
-  }, [speaking, media?.id]);
+  }, [media?.id, options?.duck]);
 
   return (
     <div className={`ls-video${media ? '' : ' ls-empty'}`}>

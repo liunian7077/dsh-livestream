@@ -35,5 +35,14 @@
       "angry": "angry.webm",
       "shy": "shy.webm"
     }
+  },
+  "moodDescriptions": {
+    "laugh": "开心地笑",
+    "shy": "害羞",
+    "shocked": "吓一跳",
+    "scared": "害怕",
+    "sad": "难过",
+    "angry": "气鼓鼓",
+    "think": "歪着头琢磨"
   }
 }

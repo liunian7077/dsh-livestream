@@ -7,6 +7,8 @@
  * POST /media?id=…&state=playing|ended|error&at=<秒>&token=…。
  */
 
+import type { LiveConnectionState, LivePlatform } from '../core/live';
+
 export const STAGE_PROTOCOL = 1;
 
 /** 角色包清单（assets/characters/<id>/character.json） */
@@ -20,6 +22,8 @@ export interface CharacterManifest {
   voice?: string;
   renderer: 'clips' | 'image';
   license?: string;
+  /** 当前角色可用标记的中文含义，交给主播与游戏线选择表情、动作 */
+  moodDescriptions?: Record<string, string>;
   /** 动画片段渲染器：待机循环、说话循环；有表情时先播 out，再播表情，再播 in 回到说话 */
   clips?: {
     size: [number, number];
@@ -144,6 +148,11 @@ export interface SongPlayback {
   detail?: string;
 }
 
+/** 有可播放的歌曲时独占舞台媒体；搜索音源和播放失败时不拦视频。 */
+export function musicHasPriority(playback: SongPlayback | null | undefined): boolean {
+  return !!playback && playback.status !== 'resolving' && playback.status !== 'error';
+}
+
 export const SONG_PLAYBACK_LABELS: Record<SongPlaybackStatus, string> = {
   resolving: '获取音源', loading: '等待舞台播放', playing: '正在播放', paused: '已暂停', blocked: '等待允许播放', error: '播放失败',
 };
@@ -233,13 +242,15 @@ export type StageEvent =
   | { v: 1; type: 'board'; text: string; at: number }
   /** 滚动通知（主人在控制台写的，出状况时告诉观众）；空串收起 */
   | { v: 1; type: 'notice'; text: string; at: number }
+  /** 主人设置的舞台显示名称；空串时跟随平台标题 */
+  | { v: 1; type: 'stageTitle'; title: string; at: number }
   /** 点歌状态；队列变化时更新，中途打开舞台时补发 */
   | { v: 1; type: 'songs'; songs: StageSongs; at: number }
   /** isUpdate：同 id 再来一次（礼物连击累加） */
   | { v: 1; type: 'live'; event: StageLiveEvent; isUpdate: boolean; at: number }
   /** 她正在回应这几位观众（弹幕流里高亮） */
   | { v: 1; type: 'focus'; userIds: string[]; at: number }
-  | { v: 1; type: 'room'; online?: number; title?: string; onAir: boolean; at: number }
+  | { v: 1; type: 'room'; online?: number; title?: string; platform?: LivePlatform; connection?: LiveConnectionState; onAir: boolean; at: number }
   /** 这场直播她用掉的 token（累计）；turn 是刚结束的这一步用的，model 是哪个模型 */
   | { v: 1; type: 'usage'; tokens: number; turn?: number; model?: string; at: number }
   | { v: 1; type: 'finance'; finance: StageFinance; at: number }

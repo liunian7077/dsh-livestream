@@ -1,30 +1,26 @@
 /**
  * 豆包语音合成（V3 HTTP 单向流式）：一次请求拿回整句 mp3。
- * 按音色选资源和鉴权：
- *   - 复刻音色（S_ 开头）：seed-icl-2.0，新版控制台的 API Key（X-Api-Key）；固定按中文念（复刻时用的参考音频可能是别的语言）
- *   - 2.0 音色（…_uranus_bigtts）：seed-tts-2.0，新版控制台的 API Key
- *   - 其余（1.0 音色）：seed-tts-1.0，旧版控制台的 APP ID + Access Token
+ * 按音色选资源：复刻音色（S_ 开头）用 seed-icl-2.0，2.0 音色用 seed-tts-2.0，其余用 seed-tts-1.0。
+ * 鉴权优先使用新版控制台的 API Key（X-Api-Key），没有时使用旧版的 APP ID + Access Token；不由音色决定。
  * 密钥不进配置：通过 DSH 的 credentials 服务按名字取（DOUBAO_TTS_API_KEY / DOUBAO_TTS_APP_ID / DOUBAO_TTS_ACCESS_KEY）。
  */
 
 import { randomUUID } from 'node:crypto';
-import { DEFAULT_VOICE, usesNewConsole } from './voices';
+import { DEFAULT_VOICE, usesV2Voice } from './voices';
 
 export { DEFAULT_VOICE };
 export const TTS_URL = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
 
 export interface TtsAuth {
-  /** 旧版控制台（1.0 音色） */
+  /** 旧版控制台 */
   appId?: string;
   accessKey?: string;
-  /** 新版控制台（2.0 音色、复刻音色） */
+  /** 新版控制台 */
   apiKey?: string;
 }
 
 interface VoiceRoute {
   resource: string;
-  /** 新版控制台的 API Key 还是旧版的 APP ID + Access Token */
-  newConsole: boolean;
   additions?: Record<string, unknown>;
 }
 
@@ -39,14 +35,14 @@ export function languageOf(text: string): 'ja' | 'zh-cn' {
 }
 
 export function routeOf(voice: string, text = ''): VoiceRoute {
-  if (voice.startsWith('S_')) return { resource: 'seed-icl-2.0', newConsole: true, additions: { explicit_language: languageOf(text) } };
-  if (usesNewConsole(voice)) return { resource: 'seed-tts-2.0', newConsole: true };
-  return { resource: 'seed-tts-1.0', newConsole: false };
+  if (voice.startsWith('S_')) return { resource: 'seed-icl-2.0', additions: { explicit_language: languageOf(text) } };
+  if (usesV2Voice(voice)) return { resource: 'seed-tts-2.0' };
+  return { resource: 'seed-tts-1.0' };
 }
 
-/** 这个音色要的密钥配齐了没有 */
-export function canSpeak(auth: TtsAuth, voice: string): boolean {
-  return routeOf(voice).newConsole ? !!auth.apiKey : !!(auth.appId && auth.accessKey);
+/** 两种鉴权方式任意配齐一种即可，不限制音色版本。 */
+export function canSpeak(auth: TtsAuth): boolean {
+  return !!(auth.apiKey || (auth.appId && auth.accessKey));
 }
 
 /** 逐字时间：这个字（可能带着后面的标点）在音频里从几秒念到几秒 */
@@ -64,8 +60,9 @@ export interface Speech {
 
 /** rate：语速（-50 到 100，0 是正常） */
 export async function synthesize(auth: TtsAuth, voice: string, text: string, signal: AbortSignal, rate = 0): Promise<Speech> {
+  if (!canSpeak(auth)) throw new Error('火山引擎语音未配置凭据：请在设置中保存豆包语音 API Key，或配置 DOUBAO_TTS_APP_ID 和 DOUBAO_TTS_ACCESS_KEY');
   const route = routeOf(voice, text);
-  const keyHeaders: Record<string, string> = route.newConsole
+  const keyHeaders: Record<string, string> = auth.apiKey
     ? { 'X-Api-Key': auth.apiKey ?? '' }
     : { 'X-Api-App-Id': auth.appId ?? '', 'X-Api-Access-Key': auth.accessKey ?? '' };
   const res = await fetch(TTS_URL, {
@@ -88,7 +85,12 @@ export async function synthesize(auth: TtsAuth, voice: string, text: string, sig
       },
     }),
   });
-  if (!res.ok) throw new Error(`豆包语音 HTTP ${res.status}（${route.resource}）`);
+  if (!res.ok) {
+    const error = await res.json().catch(() => null) as { code?: number; message?: string; header?: { code?: number; message?: string } } | null;
+    const detail = error?.header ?? error;
+    const reason = [detail?.code, detail?.message].filter(Boolean).join(' ');
+    throw new Error(`火山引擎语音 HTTP ${res.status}（${route.resource}）${reason ? `：${reason}` : ''}`);
+  }
   const chunks: Buffer[] = [];
   const words: TimedWord[] = [];
   for (const line of (await res.text()).split('\n')) {
@@ -97,14 +99,16 @@ export async function synthesize(auth: TtsAuth, voice: string, text: string, sig
       code?: number; message?: string; data?: string;
       sentence?: { words?: Array<{ word?: string; startTime?: number; endTime?: number }> };
     };
+    if (msg.code && msg.code !== 20000000) throw new Error(`火山引擎语音 ${msg.code} ${msg.message ?? ''}`);
     if (msg.data) chunks.push(Buffer.from(msg.data, 'base64'));
     // 第一条 sentence 是整段文字（words 为空），后面每句一条带逐字时间
     else if (msg.sentence?.words?.length) {
       for (const w of msg.sentence.words) {
         if (w.word && typeof w.startTime === 'number' && typeof w.endTime === 'number') words.push({ word: w.word, start: w.startTime, end: w.endTime });
       }
-    } else if (msg.code && msg.code !== 20000000) throw new Error(`豆包语音 ${msg.code} ${msg.message ?? ''}`);
+    }
   }
+  if (!chunks.some((chunk) => chunk.length > 0)) throw new Error(`火山引擎语音未返回音频（${route.resource}，音色 ${voice}）`);
   words.sort((a, b) => a.start - b.start);
   return { audio: new Uint8Array(Buffer.concat(chunks)), words };
 }

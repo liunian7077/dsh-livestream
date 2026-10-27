@@ -5,7 +5,7 @@
  *
  *   Common       1 method, 2 msgId, 3 roomId, 4 createTime(秒)
  *   User         1 id, 3 nickName, 9 avatarThumb{1 urlList}, 23 payGrade,
- *                24 fansClub{1 data{1 clubName, 2 level, 6 anchorId}}, 38 displayId, 1028 idStr
+ *                24 fansClub{1 data{1 clubName, 2 level, 6 anchorId}}, 38 displayId, 46 secUid, 1028 idStr
  *   ChatMessage  2 user, 3 content
  *   GiftMessage  2 giftId, 5 repeatCount, 6 comboCount, 7 user, 9 repeatEnd, 11 groupId,
  *                15 gift{2 describe, 12 diamondCount, 16 name}
@@ -59,11 +59,13 @@ export function resetDouyinDecode(): void {
   seq = 0;
 }
 
-function userOf(msg: Map<number, Array<bigint | Buffer>> | undefined, common: Map<number, Array<bigint | Buffer>> | undefined, ctx: DouyinRoomContext): LiveUser {
-  const user = pbChild(msg, 2) ?? pbChild(common, 15);
+function userOf(msg: Map<number, Array<bigint | Buffer>> | undefined, common: Map<number, Array<bigint | Buffer>> | undefined, ctx: DouyinRoomContext, field = 2): LiveUser {
+  const user = pbChild(msg, field) ?? pbChild(common, 15);
   // idStr 是字符串形式，避免 19 位 id 过 Number 时丢精度
   const id = pbString(user, 1028) || pbId(user, 1);
   const out: LiveUser = { id, name: pbString(user, 3) || '观众' };
+  const secUid = pbString(user, 46);
+  if (secUid) out.secUid = secUid;
   const avatar = pbChild(user, 9);
   const face = avatar ? pbString(avatar, 1) : '';
   if (face) out.face = face;
@@ -125,7 +127,7 @@ function gift(msg: Map<number, Array<bigint | Buffer>>, common: Map<number, Arra
   const valueYuan = Math.round(diamondCount * delta) / DIAMOND_PER_YUAN;
   const id = `douyin:gift:${key}`;
   return {
-    ...base('gift', id, userOf(msg, common, ctx), tsOf(common, now)),
+    ...base('gift', id, userOf(msg, common, ctx, 7), tsOf(common, now)),
     giftName: name,
     count: delta,
     valueYuan: Math.round(valueYuan * 1000) / 1000,
@@ -139,7 +141,7 @@ function member(msg: Map<number, Array<bigint | Buffer>>, common: Map<number, Ar
 
 function like(msg: Map<number, Array<bigint | Buffer>>, common: Map<number, Array<bigint | Buffer>>, ctx: DouyinRoomContext, now: number): LiveEvent | null {
   const id = pbId(common, 2) ? `douyin:like:${pbId(common, 2)}` : nextId('like');
-  return { ...base('like', id, userOf(msg, common, ctx), tsOf(common, now)) } as LiveEvent;
+  return { ...base('like', id, userOf(msg, common, ctx, 5), tsOf(common, now)) } as LiveEvent;
 }
 
 /** action：1 关注、2 分享。其余（比如 3）先当关注 —— 抖音只推这两种 */
@@ -152,7 +154,7 @@ function social(msg: Map<number, Array<bigint | Buffer>>, common: Map<number, Ar
 
 function membership(msg: Map<number, Array<bigint | Buffer>>, common: Map<number, Array<bigint | Buffer>>, ctx: DouyinRoomContext, now: number): LiveEvent | null {
   if (pbNumber(msg, 2) !== 2) return null; // 只要「加入」，升级不入事件
-  const user = userOf(msg, common, ctx);
+  const user = userOf(msg, common, ctx, 4);
   const id = pbId(common, 2) ? `douyin:fansclub:${pbId(common, 2)}` : nextId('fansclub');
   return {
     ...base('membership', id, user, tsOf(common, now)),
@@ -210,8 +212,8 @@ export function decodeDouyinMessage(method: string, payload: Buffer, ctx: Douyin
     }
     case 'WebcastRoomUserSeqMessage': {
       const stats: Partial<LiveRoomStats> = {};
-      const online = pbNumber(msg, 3) || pbNumber(msg, 7);
-      if (online > 0) stats.online = online;
+      // total 是当前在线（protobuf 的缺省值为 0）；totalUser 是累计人数，不能拿来补在线人数。
+      stats.online = pbNumber(msg, 3);
       const watched = pbNumber(msg, 11) || pbNumber(msg, 7);
       if (watched > 0) stats.watched = watched;
       return Object.keys(stats).length ? [{ type: 'stats', stats }] : [];

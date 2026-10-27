@@ -26,6 +26,7 @@ import { topicText } from '../core/topicText';
 import type { Songbook } from './songbook';
 import { lookupViewer, type ViewerLookup } from '../core/viewerLookup';
 import type { BrainState, GameSource, GameStatus, StageLiveEvent, StageUser } from '../stage/protocol';
+import { musicHasPriority } from '../stage/protocol';
 import { gameStatusOf } from './gameStatus';
 import { Player, type PlayRequest } from './player';
 import type { VideoNotes } from './watchAlong';
@@ -268,6 +269,7 @@ export class LiveShow {
     this.platform = platform;
     this.unsubscribe = this.hub.subscribe((event, isUpdate) => this.observe(event, isUpdate));
     if (!this.roomTimer) this.roomTimer = setInterval(() => this.syncRoom(), 1000);
+    this.syncRoom();
     return status;
   }
 
@@ -278,6 +280,7 @@ export class LiveShow {
     this.roomId = null;
     if (this.roomTimer) clearInterval(this.roomTimer);
     this.roomTimer = null;
+    this.syncRoom();
   }
 
   /** 测试用：不连直播间也能往里塞事件（控制台的「模拟观众」） */
@@ -312,14 +315,15 @@ export class LiveShow {
   /** 在线人数、主播身份、开没开播：跟着直播间走 */
   private syncRoom(): void {
     const status = this.hub.status();
-    this.attention.setOnline(status.stats.online);
+    const online = status.state === 'connected' && status.stats.live !== false ? status.stats.online : undefined;
+    this.attention.setOnline(online);
     this.attention.setAnchorId(status.room?.anchorId);
     // 直播间没开播（主人在测试）：没人在看也照常演
     this.attention.setRehearsal(status.stats.live !== true);
-    const room = JSON.stringify([status.stats.online, status.room?.title, this.onAir]);
+    const room = JSON.stringify([online, status.room?.title, status.room?.platform, status.state, this.onAir]);
     if (room !== this.lastRoom) {
       this.lastRoom = room;
-      this.stage.broadcast({ type: 'room', online: status.stats.online, title: status.room?.title, onAir: this.onAir });
+      this.stage.broadcast({ type: 'room', online, title: status.room?.title, platform: status.room?.platform, connection: status.state, onAir: this.onAir });
     }
   }
 
@@ -838,11 +842,15 @@ export class LiveShow {
     return this.brainSession;
   }
 
+  get livePlatform(): LivePlatform | null {
+    return this.roomId ? this.platform : null;
+  }
+
   // ── 她的工具用到的 ──────────────────────────────────
 
   /** 按她看到的名字（或 UID）在这场直播最近的事件里找观众；找不到、对不上好几位时带着候选（见 core/viewerLookup） */
-  lookupViewer(who: string): ViewerLookup {
-    return lookupViewer(who, this.hub.recentEvents(), { simulatedPrefix: SIMULATED_PREFIX });
+  lookupViewer(who: string, platform: LivePlatform = this.platform): ViewerLookup {
+    return lookupViewer(who, this.hub.recentEvents(), { simulatedPrefix: SIMULATED_PREFIX, platform });
   }
 
   /** 她私信了一位观众：记进这场的记录（复盘、剪视频用） */
@@ -880,23 +888,28 @@ export class LiveShow {
 
   /** 这位观众认不认识：这场里出现过，或者观众记忆里有他（私信只发给认识的人） */
   knowsViewer(uid: string): boolean {
-    return this.hub.recentEvents().some((e) => e.user.id === uid) || !!this.memory.store.getViewer(this.platform, uid);
+    return this.hub.recentEvents().some((e) => e.platform === this.platform && e.user.id === uid) || !!this.memory.store.getViewer(this.platform, uid);
   }
 
   /** 这位观众说过「忘了我」：不看、不记 */
-  optedOut(uid: string): boolean {
-    return this.memory.store.isOptedOut(this.platform, uid);
+  optedOut(uid: string, platform: LivePlatform = this.platform): boolean {
+    return this.memory.store.isOptedOut(platform, uid);
   }
 
   /** 她看了这位观众的主页：自己的直播间里记一句，下次见到他卡片里会提 */
-  rememberProfile(uid: string, summary: string): void {
-    if (this.memoryStream && this.memory.store.getViewer(this.platform, uid)) this.memory.store.setAppraisal(this.platform, uid, { summary, at: Date.now() });
+  rememberProfile(uid: string, summary: string, platform: LivePlatform = this.platform): void {
+    if (this.memoryStream && this.memory.store.getViewer(platform, uid)) this.memory.store.setAppraisal(platform, uid, { summary, at: Date.now() });
   }
 
   /** 停下正在放的视频（她让停的、下播），不再听写后面的 */
   stopVideo(how = 'stopped') {
+    if (how === 'song' && this.player.current) this.player.current.error = '点歌优先，视频已停止';
     this.endWatch(how);
     return this.player.stop();
+  }
+
+  get musicHasPriority(): boolean {
+    return musicHasPriority(this.options.songs?.()?.playback);
   }
 
   /**
@@ -904,6 +917,10 @@ export class LiveShow {
    * done：不放了的时候（放完、停下、换掉、下播）告诉调用的人放了多久、这期间她说了什么
    */
   playVideo(request: PlayRequest, notes?: VideoNotes, done?: (end: VideoEnd) => void) {
+    if (this.musicHasPriority) {
+      notes?.stop();
+      return null;
+    }
     const replaced = this.player.current;
     this.endWatch('replaced');
     const video = this.player.play(request);

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { LiveShow, type LiveSnapshot } from '../body/show';
 import { Whisper } from '../body/asr';
 import { BiliAccount } from '../body/biliAccount';
+import { DouyinProfiles } from '../body/douyinProfile';
 import { BiliVideos } from '../body/biliVideo';
 import { BiliSocial } from '../body/biliSocial';
 import { VideoLibrary } from '../body/videoLibrary';
@@ -26,10 +27,11 @@ import { StageServer } from '../body/server';
 import { Songbook, type QueuedSong } from '../body/songbook';
 import { Finance } from '../body/finance';
 import { findSong, resolveSong } from '../body/netease';
-import { canSpeak, subtitleTimeline, synthesize, type TtsAuth } from '../body/tts';
+import { subtitleTimeline, synthesize, type TtsAuth } from '../body/tts';
 import { DEFAULT_VOICE } from '../body/voices';
 import type { DistillLlm } from '../core/memory/distill';
 import type { CharacterManifest, GameSource, GiftPrice, StageSong } from '../stage/protocol';
+import { musicHasPriority } from '../stage/protocol';
 import type { LivePlatform } from '../core/live';
 import { gameRect } from '../stage/layout';
 import { connectObs, showGameSources } from '../body/obs';
@@ -39,6 +41,8 @@ export interface Settings {
   /** 采集哪個平台的弹幕：B 站或抖音 */
   platform: LivePlatform;
   roomId: number | null;
+  /** 舞台显示名称；留空跟随平台房间标题，未连接时用角色默认名称 */
+  stageTitle: string;
   character: string;
   template: string;
   /** 空串用角色包的默认音色 */
@@ -130,8 +134,8 @@ export const SECRETS = {
   douyinCookie: 'DOUYIN_COOKIE',
   neteaseCookie: 'NETEASE_COOKIE',
   ttsApiKey: 'DOUBAO_TTS_API_KEY',
-  ttsAppId: 'DOUBAO_TTS_APP_ID',
-  ttsAccessKey: 'DOUBAO_TTS_ACCESS_KEY',
+  ttsAppId: 'oyjps4g72UAaknH8',
+  ttsAccessKey: "VxCgNvLTE.ChBveWpwczRnNzJVQWFrbkg4ELeFu-sHGAEqELvYz57MO0_2l1hMSYTrzRY.G9kL9y3RFcMVm38jY3pCItjp3ohZDD6m6HQVQh2iZpFeUzI36jZMLJRFbwZqvUy4gmZG-jqE5ytXOTYnyS6OGgeZ",
 } as const;
 
 export const PRESET_ID = 'dsh-livestream';
@@ -161,6 +165,7 @@ function loadSettings(): Settings {
   const settings: Settings = {
     platform: saved.platform === 'douyin' ? 'douyin' : 'bilibili',
     roomId: null,
+    stageTitle: '',
     character: 'dafeiyu',
     template: 'default',
     voice: '',
@@ -189,6 +194,7 @@ function loadSettings(): Settings {
     ...saved,
   };
   // 存档里的值可能来自旧版本或被手改过：夹一下范围
+  settings.stageTitle = typeof settings.stageTitle === 'string' ? settings.stageTitle.trim().slice(0, 40) : '';
   settings.songRequest = settings.songRequest !== false;
   settings.songQueueMax = Math.max(1, Math.min(100, Math.round(Number(settings.songQueueMax) || 20)));
   settings.songPerUserMax = Math.max(1, Math.min(5, Math.round(Number(settings.songPerUserMax) || 2)));
@@ -231,10 +237,11 @@ export const hooks: {
   log: (level, message) => (level === 'warn' ? console.warn : console.log)(`[dsh-livestream] ${message}`),
 };
 
-async function ttsAuth(voice: string): Promise<TtsAuth | null> {
-  const [apiKey, appId, accessKey] = await Promise.all([hooks.secret(SECRETS.ttsApiKey), hooks.secret(SECRETS.ttsAppId), hooks.secret(SECRETS.ttsAccessKey)]);
-  const auth = { apiKey, appId, accessKey };
-  return canSpeak(auth, voice) ? auth : null;
+async function ttsAuth(): Promise<TtsAuth> {
+  const [apiKey, appId, accessKey] = await Promise.all([
+    hooks.secret(SECRETS.ttsApiKey), hooks.secret('DOUBAO_TTS_APP_ID'), hooks.secret('DOUBAO_TTS_ACCESS_KEY'),
+  ]);
+  return { apiKey, appId: appId || SECRETS.ttsAppId, accessKey: accessKey || SECRETS.ttsAccessKey };
 }
 
 export const packs = new Packs(packageDir(), dataDir);
@@ -264,7 +271,32 @@ export function currentVoice(): string {
 export function currentMoods(): string[] {
   const c = currentCharacter();
   const moods = c?.clips?.moods ?? c?.image?.moods ?? {};
-  return ['talk', ...Object.keys(moods)];
+  return [...new Set(['talk', ...Object.keys(moods), ...Object.keys(c?.clips?.talkMoods ?? {})])];
+}
+
+/** 已连接的房间优先，彩排时用控制台所选的平台。 */
+export function currentPlatform(): LivePlatform {
+  return show.livePlatform ?? settings.platform;
+}
+
+const sentContext = new Map<string, string>();
+async function pushWithContext(sessionId: string, text: string, now?: boolean): Promise<boolean> {
+  const c = currentCharacter();
+  const platform = currentPlatform() === 'douyin' ? '抖音' : 'B 站';
+  const context = [
+    `【直播插件状态】当前直播平台：${platform}；当前角色：${c?.name ?? settings.character}。`,
+    'view_profile 查询当前直播平台的公开主页。send_dm 只支持 B 站，抖音私信尚未接入；不要替抖音观众调用 B 站私信或账号操作。',
+    `当前角色可用的表情、动作标记（以此列表为准）：${currentMoods().map((m) => `[${m}] ${c?.moodDescriptions?.[m] ?? (m === 'talk' ? '平常说话' : m)}`).join('；')}。`,
+    '标记写在一句话前面，不念出；不写标记用默认说话动作。只用当前角色有的标记，动作只是画面表现，不代表游戏已经操作或真的收到了礼物。',
+  ].join('\n');
+  const changed = sentContext.get(sessionId) !== context;
+  // 游戏交接消息的开头有协议标记，保留正文开头以免重复念交接回执。
+  const ok = await hooks.push(sessionId, changed ? `${text}\n\n${context}` : text, now);
+  if (ok && changed) {
+    if (sentContext.size >= 64) sentContext.clear();
+    sentContext.set(sessionId, context);
+  }
+  return ok;
 }
 
 const distill: DistillLlm = async (system, user) => {
@@ -274,7 +306,7 @@ const distill: DistillLlm = async (system, user) => {
 
 export const show = new LiveShow(
   {
-    push: (sessionId, text, now) => hooks.push(sessionId, text, now),
+    push: pushWithContext,
     synthesize: (text, signal, voice) => {
       if (voice) return speech(text, signal, voice);
       const ready = prepared.get(`${currentVoice()}|${text}`);
@@ -322,6 +354,12 @@ export function placeGame(source: GameSource | null): void {
   })();
 }
 
+/** 显示名称换了：立即更新，刷新舞台后也保留 */
+export function publishStageTitle(): void {
+  show.stage.broadcast({ type: 'stageTitle', title: settings.stageTitle });
+}
+publishStageTitle();
+
 /** 告示板换了：舞台马上换（之后连上的舞台页也拿到最新的） */
 export function publishBoard(): void {
   show.stage.broadcast({ type: 'board', text: settings.boardText });
@@ -351,18 +389,20 @@ export function songView(entry: QueuedSong): StageSong {
 
 /** 队列和开关变化立即同步；Stage 会保留最新状态供重连时补发 */
 export function publishSongs(): void {
-  show.stage.broadcast({ type: 'songs', songs: {
-    enabled: settings.songRequest,
-    playing: songbook.playing ? songView(songbook.playing) : null,
-    waiting: songbook.waiting.map(songView),
-    playback: songbook.playback,
-  } });
+  if (musicHasPriority(songbook.playback)) show.stopVideo('song');
+  show.stage.broadcast({
+    type: 'songs', songs: {
+      enabled: settings.songRequest,
+      playing: songbook.playing ? songView(songbook.playing) : null,
+      waiting: songbook.waiting.map(songView),
+      playback: songbook.playback,
+    }
+  });
 }
 publishSongs();
 
 async function speech(text: string, signal: AbortSignal, voice = currentVoice()): Promise<{ audio: Uint8Array; timeline: Array<{ chars: number; atMs: number }> } | null> {
-  const auth = await ttsAuth(voice);
-  if (!auth) return null;
+  const auth = await ttsAuth();
   const { audio, words } = await synthesize(auth, voice, text, signal);
   return { audio, timeline: subtitleTimeline(text, words) };
 }
@@ -468,14 +508,15 @@ export function takeLive(): (LiveSnapshot & { broadcasting: boolean }) | null {
 
 /** 她点赞、看评论、发评论、看收件箱（开播账号） */
 export const social = new SocialManager(new BiliSocial(cookie));
+export const douyinProfiles = new DouyinProfiles(join(dataDir, 'douyin', 'browser'), () => cookieFor('douyin'));
 
 /** 直播时每隔一会儿看一眼收件箱：开播以后新来的私信、回复、@，没别的事时告诉她 */
 const INBOX_EVERY_MS = 90_000;
 export function watchInbox(): () => void {
   let stopped = false;
   const timer = setInterval(() => {
-    if (!show.isOnAir) return;
-    void social.newSince().then((lines) => { if (!stopped && lines.length) show.notifyInbox(lines); }).catch(() => {});
+    if (!show.isOnAir || currentPlatform() !== 'bilibili') return;
+    void social.newSince().then((lines) => { if (!stopped && currentPlatform() === 'bilibili' && lines.length) show.notifyInbox(lines); }).catch(() => { });
   }, INBOX_EVERY_MS);
   timer.unref?.();
   return () => { stopped = true; clearInterval(timer); };

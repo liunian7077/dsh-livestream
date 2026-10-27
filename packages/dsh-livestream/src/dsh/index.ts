@@ -20,8 +20,8 @@ import type { GameSource, GiftPrice, StageEvent } from '../stage/protocol';
 import { splitByMood } from '../core/moodText';
 import { speakable } from '../core/speakable';
 import { GUEST_VOICE } from '../body/voices';
-import { agentReady, asr, broadcast, cookie, cookieFor, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, publishSongs, SECRETS, social, songbook, songView, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, watchInbox, type Pace, type Settings } from './runtime';
-import { finance, publishFinance } from './runtime';
+import { agentReady, asr, broadcast, cookie, cookieFor, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, publishSongs, publishStageTitle, SECRETS, social, songbook, songView, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, watchInbox, type Pace, type Settings } from './runtime';
+import { currentPlatform, douyinProfiles, finance, publishFinance } from './runtime';
 
 export const name = 'dsh-livestream';
 export const inject = ['connection'];
@@ -94,7 +94,7 @@ let simSeq = 0;
 function simulated(input: { kind?: string; name?: string; text?: string; gift?: string; count?: number; yuan?: number; guard?: number }): LiveEvent | null {
   const name = (input.name ?? '').trim() || '模拟观众';
   const user: LiveUser = { id: `${SIMULATED_PREFIX}${name}`, name, ...(input.guard ? { guardLevel: input.guard } : {}) };
-  const base = { id: `sim-${Date.now()}-${++simSeq}`, platform: 'bilibili' as const, ts: Date.now(), user };
+  const base = { id: `sim-${Date.now()}-${++simSeq}`, platform: currentPlatform(), ts: Date.now(), user };
   switch (input.kind) {
     case 'chat': return input.text?.trim() ? { ...base, kind: 'chat', text: input.text.trim() } : null;
     case 'gift': return { ...base, kind: 'gift', giftName: input.gift || '小花花', count: input.count ?? 1, valueYuan: input.yuan ?? 0.1 };
@@ -183,6 +183,7 @@ export function apply(ctx: HostContext): void {
       songbook.stop();
       broadcast.dispose();
       asr.close();
+      await douyinProfiles.close();
       await started;
       await server.stop();
     };
@@ -205,6 +206,15 @@ export function apply(ctx: HostContext): void {
     ctx.effect(() => ctx.connection.fetch.register({ path, methods, requestBody: 'buffered', fetch }), label);
 
   route('/api/dsh-livestream/state', ['GET'], () => json(state()), 'state');
+
+  route('/api/dsh-livestream/douyin/login', ['POST'], async () => {
+    try {
+      await douyinProfiles.openLogin();
+      return json({ ok: true });
+    } catch {
+      return fail('抖音窗口没有打开；请确认本机已安装 Chrome 或 Edge，并检查网络。');
+    }
+  }, 'douyin profile login');
 
   route('/api/dsh-livestream/settings', ['POST'], async (request) => {
     const patch = await body<Partial<Settings>>(request);
@@ -238,6 +248,7 @@ export function apply(ctx: HostContext): void {
     if (patch.broadcast !== undefined) next.broadcast = !!patch.broadcast;
     if (patch.areaId !== undefined) next.areaId = patch.areaId ? Number(patch.areaId) : null;
     if (patch.liveTitle !== undefined) next.liveTitle = String(patch.liveTitle).slice(0, 40);
+    if (patch.stageTitle !== undefined) next.stageTitle = String(patch.stageTitle).trim().slice(0, 40);
     if (patch.liveCover !== undefined) next.liveCover = String(patch.liveCover).trim().replace(/^"|"$/g, '');
     if (patch.pushProtocol !== undefined) next.pushProtocol = patch.pushProtocol === 'rtmp' ? 'rtmp' : 'srt';
     if (patch.streamKbps !== undefined) next.streamKbps = Math.max(1000, Math.min(12000, Number(patch.streamKbps) || 4500));
@@ -281,6 +292,7 @@ export function apply(ctx: HostContext): void {
     // 换了 Python 或模型：关掉正在跑的识别进程，下次用新的
     if ((next.asrPython !== undefined && next.asrPython !== settings.asrPython) || (next.asrModel !== undefined && next.asrModel !== settings.asrModel)) asr.close();
     updateSettings(next);
+    if (next.stageTitle !== undefined) publishStageTitle();
     if (next.initialBalanceYuan !== undefined || next.giftPrices !== undefined) publishFinance();
     if (next.boardText !== undefined) publishBoard();
     if (next.noticeText !== undefined) publishNotice();

@@ -136,7 +136,13 @@ export class Player {
   private clear(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    if (this.playing) this.stage.broadcast({ type: 'media', action: 'stop', id: this.playing.id });
+    if (this.playing) {
+      if (this.playing.waiter) {
+        this.playing.error ??= '视频已停止或被替换';
+        this.playing.waiter('error');
+      }
+      this.stage.broadcast({ type: 'media', action: 'stop', id: this.playing.id });
+    }
     this.playing = null;
   }
 }

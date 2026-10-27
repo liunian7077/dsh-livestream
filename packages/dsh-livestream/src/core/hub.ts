@@ -104,8 +104,9 @@ export class LiveHub {
         if (state === 'connected') {
           this.connectedAt ??= Date.now();
           this.lastError = detail?.error;
-        } else if (detail?.error) {
-          this.lastError = detail.error;
+        } else {
+          this.stats.online = undefined;
+          if (detail?.error) this.lastError = detail.error;
         }
         this.scheduleFlush();
       },
@@ -119,6 +120,8 @@ export class LiveHub {
     source?.stop();
     this.config = null;
     this.state = 'idle';
+    this.room = undefined;
+    this.stats = {};
     this.connectedAt = undefined;
     this.loggedIn = false;
     this.scheduleFlush();
