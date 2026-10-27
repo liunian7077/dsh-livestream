@@ -21,7 +21,9 @@ import { LiveMemory } from '../core/memory/memory';
 import { LiveMemoryStore } from '../core/memory/store';
 import { cleanName, cleanText } from '../core/safety';
 import { speakable } from '../core/speakable';
+import { isSongCommand, parseSongRequest, type SongQuery } from '../core/songRequest';
 import { topicText } from '../core/topicText';
+import type { Songbook } from './songbook';
 import { lookupViewer, type ViewerLookup } from '../core/viewerLookup';
 import type { BrainState, GameSource, GameStatus, StageLiveEvent, StageUser } from '../stage/protocol';
 import { gameStatusOf } from './gameStatus';
@@ -52,6 +54,8 @@ export interface ShowHooks {
   persist?(snapshot: LiveSnapshot | null): void;
   /** 游戏画面上舞台、撤下（OBS 抓游戏窗口、叠 HUD） */
   onGame?(source: GameSource | null): void;
+  /** 开播时收到的直播事件（财务统计等宿主逻辑）。 */
+  onLive?(event: LiveEvent): void;
 }
 
 /** 正在播的一场：插件重启后接着播要的东西 */
@@ -86,6 +90,8 @@ export interface ShowOptions {
   board?: () => string;
   /** 她在玩游戏时，两次把直播间的事推给她至少隔多少毫秒（控制台设置，改了马上生效） */
   gameChatGapMs?: () => number;
+  /** 点歌队列；控制台关掉点歌就不给（改了马上生效） */
+  songs?: () => Songbook | null;
 }
 
 /** 她说过的一句话（控制台显示、下播提炼用） */
@@ -195,6 +201,8 @@ export class LiveShow {
   private queuedGame = 0;
   /** 她这一轮还在进行（推了一件事、或者主人在会话里直接跟她说话） */
   private turnRunning = false;
+  /** 点歌回执这一轮只说结果，视频工具不参与。 */
+  private songReply = false;
   private turnSince = 0;
   private pushing = false;
   /** 道别已经推给她了：这一轮结束、话念完就收工 */
@@ -281,11 +289,21 @@ export class LiveShow {
 
   private observe(event: LiveEvent, isUpdate: boolean): void {
     const now = Date.now();
-    this.attention.observe(event, isUpdate, now);
+    if (this.onAir && !event.user.id.startsWith(SIMULATED_PREFIX)) this.hooks.onLive?.(event);
+    // 点歌只进音乐队列；不再同时成为普通弹幕、主人发言或刷屏话题。
+    if (event.kind === 'chat' && isSongCommand(event.text)) this.attention.noteAudience(event, now);
+    else this.attention.observe(event, isUpdate, now);
     // 只记自己直播间的观众（主人在控制台勾了的）；模拟观众（控制台彩排）不记
     if (this.onAir && this.memoryStream && !event.user.id.startsWith(SIMULATED_PREFIX)) this.memory.observe(event, isUpdate, now);
     const shown = toStage(event);
     if (shown) this.stage.broadcast({ type: 'live', event: shown, isUpdate });
+    // 点歌：以「点歌」开头的弹幕，搜到就排进队列，搜不到就回一句没有。
+    // 只在开播时处理，免得没在播的时候别人的弹幕就抢了主人的播放器；控制台的模拟观众照常能试
+    const simulated = event.user.id.startsWith(SIMULATED_PREFIX);
+    if (event.kind === 'chat' && !event.emoteOnly && !isUpdate && event.text && (this.onAir || simulated)) {
+      const query = parseSongRequest(event.text);
+      if (query) void this.takeSong(query, event.user);
+    }
     if (this.onAir && !isUpdate && (event.kind === 'superchat' || event.kind === 'membership' || (event.kind === 'gift' && event.valueYuan > 0))) {
       this.record({ type: 'event', kind: event.kind, user: cleanName(event.user.name), yuan: event.valueYuan, text: event.kind === 'superchat' ? cleanText(event.text) : undefined });
     }
@@ -317,6 +335,7 @@ export class LiveShow {
     this.ending = false;
     this.endingPushed = false;
     this.turnRunning = false;
+    this.songReply = false;
     this.attention = this.freshAttention();
     this.liveSince = Date.now();
     this.spoken = 0;
@@ -350,6 +369,7 @@ export class LiveShow {
     this.ending = false;
     this.endingPushed = false;
     this.turnRunning = false;
+    this.songReply = false;
     this.attention = this.freshAttention();
     this.memoryStream = snapshot.streamId !== null;
     if (snapshot.streamId !== null) this.memory.resume(snapshot.streamId);
@@ -430,6 +450,35 @@ export class LiveShow {
         .then((r) => this.hooks.log?.('info', `直播记忆提炼完：${r.viewers} 位观众，回顾 ${r.recap.length} 条`))
         .catch((err) => this.hooks.log?.('warn', `直播记忆提炼失败：${(err as Error).message}`));
     }
+  }
+
+  /**
+   * 有人点歌：交给点歌队列（搜歌、排队、交给舞台播放），再把结果变成一件要她回的事。
+   * 搜不到就是「没有这首歌」——由队列的返回值决定，不在这里猜。
+   */
+  private async takeSong(query: SongQuery, user: LiveUser): Promise<void> {
+    const songs = this.options.songs?.();
+    // 已经在道别了：不再搜、不再排队，免得刚说完再见又放起歌来
+    if (!songs || this.ending) return;
+    const by = cleanName(user.name) || '有人';
+    const outcome = await songs.request(query, { id: user.id || `name:${by}`, name: by });
+    this.record({
+      type: 'song',
+      outcome: outcome.kind,
+      by,
+      asked: query.raw,
+      ...('song' in outcome ? { song: outcome.song.name, artists: outcome.song.artists.join('、') } : {}),
+    });
+    if (!this.onAir || this.ending) return;
+    this.priority.push({
+      kind: 'song',
+      outcome: outcome.kind,
+      asked: query.raw,
+      by,
+      ...('song' in outcome ? { song: { name: outcome.song.name, artists: outcome.song.artists } } : {}),
+      ...(outcome.kind === 'queued' ? { position: outcome.position } : {}),
+      ...(outcome.kind === 'error' ? { reason: outcome.message } : {}),
+    });
   }
 
   /** 主人（或 who：主人那边别的人，比如帮忙管直播的经理）在控制台跟她说话 */
@@ -603,6 +652,9 @@ export class LiveShow {
     });
     this.pushing = true;
     this.setBrain('thinking', topicLabel(topic));
+    const previousSongReply = this.songReply;
+    this.songReply = topic.kind === 'song';
+    let delivered = false;
     try {
       const ok = await this.hooks.push(this.brainSession!, text, midTurn);
       if (!ok) {
@@ -611,11 +663,13 @@ export class LiveShow {
         this.setBrain('away', '她的会话不在线');
         return false;
       }
+      delivered = true;
       this.turnRunning = true;
       this.turnSince = Date.now();
       if (topic.kind === 'ending') this.endingPushed = true;
       return true;
     } finally {
+      if (!delivered) this.songReply = previousSongReply;
       this.pushing = false;
     }
   }
@@ -640,6 +694,7 @@ export class LiveShow {
     }
     if (sessionId !== this.brainSession) return;
     this.turnRunning = false;
+    this.songReply = false;
     this.turnEndedAt = Date.now();
     if (this.onAir && this.speaking === 0) this.setBrain('listening');
   }
@@ -919,6 +974,10 @@ export class LiveShow {
     return this.onAir;
   }
 
+  get isSongReply(): boolean {
+    return this.onAir && this.songReply;
+  }
+
   private setBrain(state: BrainState, detail?: string): void {
     if (this.brain === state && !detail) return;
     this.brain = state;
@@ -970,6 +1029,8 @@ export class LiveShow {
     } else {
       this.finish();
     }
+    // HMR 只改根插件时可能复用这个实例；下次 resumeLive 要重新启动导演轮询。
+    this.onAir = false;
     if (this.director) clearInterval(this.director);
     this.director = null;
     this.disconnect();
@@ -986,6 +1047,7 @@ const KIND_LABEL: Record<Topic['kind'], string> = {
   chat: '在看弹幕', superchat: '在看醒目留言', thanks: '在谢礼物', gifts: '在谢礼物', trend: '在看大家刷屏',
   welcome: '在欢迎新观众', follow: '在谢关注', idle: '在找话说', opening: '在准备开场', ending: '在准备道别', owner: '在听主人说话',
   video: '视频放完了', watching: '在看视频', inbox: '在看私信和评论', resumed: '在接着播', game: '在玩游戏',
+  song: '在放点歌',
 };
 
 function topicLabel(topic: Topic): string {

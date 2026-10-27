@@ -8,9 +8,12 @@
  * `--watch`（pnpm dev）时：不压缩、带 sourcemap，改哪块建哪块。
  * 控制台由 DSH 自带的 client-hmr 轮询 lib/client.js 的 mtime 后热替换；
  * 舞台页由插件的舞台服务器盯着 lib/stage.js / stage/index.html / stage/stage.css，重建后让页面自己刷新。
- * 宿主端没有自动重载：改 src/dsh、src/body、src/core 之后要重启 DSH。
+ * 宿主端由 DSH 自带的 dsh-hmr 重载；pnpm dev 生成 lib/cordis.hmr.patch.yml，启动 DSH 时用 --patch 加载。
  */
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { TsdownPlugin, UserConfig } from 'tsdown';
 
 /** 开发构建（tsdown --watch）。tsdown 不会把 --watch 交给配置文件，直接看命令行 */
@@ -72,7 +75,24 @@ export function host(): UserConfig {
     deps: { neverBundle: nodeExternals, onlyBundle: false },
     banner: { js: createRequireBanner },
     // 共用的运行时（runtime.ts 的单例状态）拆进 lib/chunks/
-    outputOptions: { chunkFileNames: 'chunks/[name]-[hash].js' },
+    // HMR 按已加载的文件路径使缓存失效；开发时路径固定，共享状态变化才能同时重载根插件和 agent。
+    outputOptions: { chunkFileNames: dev ? 'chunks/[name].js' : 'chunks/[name]-[hash].js' },
+    hooks: dev ? {
+      'build:prepare': () => {
+        const libDir = fileURLToPath(new URL('../lib/', import.meta.url));
+        mkdirSync(libDir, { recursive: true });
+        writeFileSync(join(libDir, 'cordis.hmr.patch.yml'), [
+          '# pnpm dev 自动生成；启动 DSH 时用 --patch 加载。',
+          '- id: hmr',
+          '  disabled: false',
+          '  config:',
+          `    root: [${JSON.stringify(libDir)}]`,
+          '    ignored: ["**/*.map", "**/client.js", "**/stage.js", "**/cordis.hmr.patch.yml"]',
+          '    debounce: 300',
+          '',
+        ].join('\n'));
+      },
+    } : undefined,
     dts: false,
     // 不在构建时清 lib/：清理由 package.json 的 build 脚本先做（watch 时也不能清）
     clean: false,

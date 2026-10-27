@@ -8,6 +8,8 @@
  *   POST /said?id=…&token=…        舞台念完一句
  *   GET  /video?id=…&token=…       正在放的视频（转发 B 站 CDN，带它要的 Referer，支持 Range）
  *   POST /media?id=…&state=…&token=…  视频开始放、放完、放不出来
+ *   GET  /music?seq=…&token=…       当前歌曲音频（网易云 CDN，支持 Range）
+ *   POST /music/state?seq=…&state=…&token=… 音乐播放状态与实际进度
  *
  * 所有请求都要带 token（OBS 里填的地址自带），只监听本机。
  * 开发时（pnpm dev）lib/stage.js 或 stage/stage.css 一重建，就让开着的舞台页自己刷新。
@@ -17,7 +19,8 @@ import { existsSync, readFileSync, statSync, unwatchFile, watchFile, type Stats 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname, join, normalize, sep } from 'node:path';
 import { Readable } from 'node:stream';
-import type { StageEvent } from '../stage/protocol';
+import type { SongPlaybackReport, StageEvent } from '../stage/protocol';
+import { NETEASE_HEADERS } from './netease';
 import type { Packs } from './packs';
 import type { Stage } from './stage';
 
@@ -52,6 +55,11 @@ export interface StageServerOptions {
   media?: {
     source(id: string): string | null;
     report(id: string, state: 'playing' | 'ended' | 'error', positionSec?: number, detail?: string): void;
+  };
+  music?: {
+    source(seq: number): string | null;
+    report(seq: number, state: SongPlaybackReport, positionMs?: number, durationMs?: number, detail?: string): void;
+    disconnect?(): void;
   };
   log?(level: 'info' | 'warn', message: string): void;
 }
@@ -99,14 +107,18 @@ export class StageServer {
     });
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     if (this.reloadTimer) clearTimeout(this.reloadTimer);
     this.reloadTimer = null;
     for (const file of this.watched) unwatchFile(file, this.onStageFile);
     this.watched.clear();
-    this.server?.closeAllConnections();
-    this.server?.close();
+    const server = this.server;
     this.server = null;
+    if (!server) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      server.close((err) => err ? reject(err) : resolve());
+      server.closeAllConnections();
+    });
   }
 
   // ── 开发时热刷新 ────────────────────────────────────
@@ -161,6 +173,25 @@ export class StageServer {
       return;
     }
     const path = url.pathname;
+    if (req.method === 'POST' && path === '/music/state') {
+      const status = url.searchParams.get('state') as SongPlaybackReport;
+      const seq = Number(url.searchParams.get('seq'));
+      if (!Number.isSafeInteger(seq) || seq < 1 || !['loading', 'playing', 'paused', 'blocked', 'error', 'ended'].includes(status)) {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
+      // 页面断开后才到达的回执，不能把已暂停的状态改回正在播放。
+      if (!this.options.stage.watchers) {
+        res.writeHead(409);
+        res.end();
+        return;
+      }
+      this.options.music?.report(seq, status, Number(url.searchParams.get('at') ?? NaN), Number(url.searchParams.get('duration') ?? NaN), url.searchParams.get('detail') ?? undefined);
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     if (req.method === 'POST' && path === '/said') {
       this.options.stage.said(url.searchParams.get('id') ?? '');
       res.writeHead(204);
@@ -184,6 +215,7 @@ export class StageServer {
     }
     if (path === '/events') return this.events(req, res, url);
     if (path === '/video') return this.video(req, res, url.searchParams.get('id') ?? '');
+    if (path === '/music') return this.music(req, res, Number(url.searchParams.get('seq')));
     if (path === '/' || path === '/index.html') return this.file(res, join(this.options.packageDir, 'stage', 'index.html'));
     // 开发时带 sourcemap：舞台页的 DevTools 里直接看 src/stage 的源码
     if (path === '/stage.js' || path === '/stage.js.map') return this.file(res, join(this.options.packageDir, 'lib', path.slice(1)));
@@ -209,11 +241,13 @@ export class StageServer {
     const t = this.options.packs.template(template);
     if (c && t) send({ v: 1, type: 'hello', character: c, template: t, build: this.stamp(stageScript(this.options.packageDir)), at: Date.now() });
     // ?preview=1：控制台里的预览，静音、不回执
-    const unsubscribe = this.options.stage.subscribe(send, url.searchParams.get('preview') !== '1');
+    const speaker = url.searchParams.get('preview') !== '1';
+    const unsubscribe = this.options.stage.subscribe(send, speaker);
     const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
     req.on('close', () => {
       clearInterval(ping);
       unsubscribe();
+      if (speaker && !this.options.stage.watchers) this.options.music?.disconnect?.();
     });
   }
 
@@ -244,6 +278,47 @@ export class StageServer {
       return;
     }
     const headers: Record<string, string> = { 'content-type': upstream.headers.get('content-type') ?? 'video/mp4', 'accept-ranges': 'bytes', 'cache-control': 'no-store' };
+    for (const name of ['content-length', 'content-range']) {
+      const value = upstream.headers.get(name);
+      if (value) headers[name] = value;
+    }
+    res.writeHead(upstream.status, headers);
+    if (!upstream.body) return void res.end();
+    Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream).on('error', () => res.destroy()).pipe(res);
+  }
+
+  /** 网易云音频：地址、Cookie 留在服务器；支持浏览器边加载边播和 Range 跳转。 */
+  private async music(req: IncomingMessage, res: ServerResponse, seq: number): Promise<void> {
+    const source = this.options.music?.source(seq);
+    if (!source) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    const timeout = setTimeout(() => abort.abort(), 20_000);
+    let upstream: Response;
+    try {
+      upstream = await fetch(source, {
+        headers: { ...NETEASE_HEADERS, ...(req.headers.range ? { Range: req.headers.range } : {}) },
+        signal: abort.signal,
+      });
+    } catch {
+      if (!res.destroyed) {
+        this.options.music?.report(seq, 'error', undefined, undefined, '网易云音频连接失败，请检查网络后重新点歌');
+        res.writeHead(502);
+        res.end();
+      }
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!upstream.ok) this.options.music?.report(seq, 'error', undefined, undefined, `网易云音频加载失败（HTTP ${upstream.status}）`);
+    const headers: Record<string, string> = {
+      'content-type': upstream.headers.get('content-type') ?? 'audio/mpeg',
+      'accept-ranges': 'bytes', 'cache-control': 'no-store',
+    };
     for (const name of ['content-length', 'content-range']) {
       const value = upstream.headers.get(name);
       if (value) headers[name] = value;

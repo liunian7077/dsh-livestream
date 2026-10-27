@@ -30,6 +30,7 @@ export interface BroadcastStatus {
 export interface BroadcastOptions {
   cookie(): Promise<string>;
   stageUrl(): string;
+  canvas?(): [number, number];
   /** 开播用的分区（子分区 id）；不给就用 B 站给这个账号准备的默认分区 */
   areaId(): number | null;
   title(): string | null;
@@ -127,7 +128,7 @@ export class Broadcast {
 
     this.set({ step: '打开 OBS、设好画质' });
     this.obs = await connectObs(true);
-    await prepareObs(this.obs, this.options.stageUrl(), this.options.kbps());
+    await prepareObs(this.obs, this.options.stageUrl(), this.options.kbps(), this.options.canvas?.());
     this.set({ step: `开始推流（${stream.protocol.toUpperCase()}，${this.options.kbps()} kbps）`, protocol: stream.protocol });
     await startStreaming(this.obs, stream.addr, stream.code);
     this.set({ phase: 'streaming', step: '推流中', startedAt: Date.now() });
@@ -164,6 +165,17 @@ export class Broadcast {
     } catch {
       return false;
     }
+  }
+
+  /** 插件卸载：释放 OBS 连接和轮询，OBS 继续推流，交给新实例接回。 */
+  dispose(): void {
+    this.cancelled = true;
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+    this.obs?.close();
+    this.obs = null;
+    // 只重载根插件时实例会复用，让 adopt 重新连接并恢复健康轮询。
+    this.state = { ...this.state, phase: 'idle', step: '', faceQr: null, error: null, health: null, startedAt: null };
   }
 
   /** 停推、下播 */

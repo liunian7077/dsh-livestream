@@ -1,9 +1,10 @@
 /**
  * 舞台页的状态：只从事件流来（protocol.ts）。挂件都读这里，不发请求、不含逻辑。
- * 唯一往回发的是「这句念完了」（出声的页面才发；预览页静音、不回执）。
+ * 出声的页面回传语音、视频和音乐的实际播放状态；预览页静音、不回执。
  */
 
-import type { BrainState, CharacterManifest, GameSource, GameStatus, StageEvent, StageLiveEvent, StageUser, TemplateManifest } from './protocol';
+import type { BrainState, CharacterManifest, GameSource, GameStatus, SongPlaybackReport, StageEvent, StageFinance, StageLiveEvent, StageSongs, StageUser, TemplateManifest } from './protocol';
+import { viewerName } from '../core/viewerName';
 import { type FxEvent, giftTier, pick, triggersOf } from './triggers';
 
 export interface ChatRow {
@@ -128,6 +129,7 @@ export interface StageState {
   /** 这场直播她用掉的 token */
   tokens: number;
   model: string;
+  finance: StageFinance | null;
   term: TermLine[];
   fx: Fx[];
   /** 她对刚才那件事的反应（角色包 reactions 配的表情）；key 每次不同 */
@@ -140,6 +142,8 @@ export interface StageState {
   board: string;
   /** 滚动通知（画面最底下），空串不显示 */
   notice: string;
+  /** 点歌队列（尚未同步时为 null） */
+  songs: StageSongs | null;
   /** 她在直播里玩的游戏的画面来源：舞台换成 game 布局 */
   game: GameSource | null;
   /** 游戏画面上那一行「她在干嘛」 */
@@ -205,7 +209,7 @@ function startUpdating(): void {
 let state: StageState = {
   connected: false, character: null, template: null, brain: 'off', brainDetail: '', line: null, lineEndedAt: 0,
   chats: [], alerts: [], focus: new Set(), reply: [], replySeq: 0, onAir: false, needsClick: false,
-  phase: wasUpdating() ? 'updating' : 'waiting', stats: freshStats(), tokens: 0, model: '', term: [], media: null, board: '', notice: '', game: null, gameStatus: null, fx: [], reaction: null,
+  phase: wasUpdating() ? 'updating' : 'waiting', stats: freshStats(), tokens: 0, model: '', finance: null, term: [], media: null, board: '', notice: '', songs: null, game: null, gameStatus: null, fx: [], reaction: null,
 };
 const subscribers = new Set<() => void>();
 
@@ -287,8 +291,93 @@ export function reportMedia(id: string, state: 'playing' | 'ended' | 'error', at
 
 export function unlockAudio(): void {
   void new Audio().play().catch(() => {});
-  pendingClick?.();
+  const speech = pendingClick;
+  const music = pendingMusicClick;
   pendingClick = null;
+  pendingMusicClick = null;
+  update((s) => ({ ...s, needsClick: false }));
+  speech?.();
+  music?.();
+}
+
+// 音乐和主播说话各用一个 Audio；控制台预览不播放，也不推进队列。
+let musicAudio: HTMLAudioElement | null = null;
+let musicSeq: number | null = null;
+let pendingMusicClick: (() => void) | null = null;
+let musicReports: Promise<unknown> = Promise.resolve();
+
+function stopMusic(): void {
+  const player = musicAudio;
+  musicAudio = null;
+  musicSeq = null;
+  pendingMusicClick = null;
+  if (player) {
+    player.pause();
+    player.removeAttribute('src');
+    player.load();
+  }
+  update((s) => ({ ...s, needsClick: !!pendingClick }));
+}
+
+function syncMusic(songs: StageSongs): void {
+  if (preview) return;
+  const entry = songs.playing;
+  const playback = songs.playback;
+  if (!entry || !playback || playback.status === 'resolving' || playback.status === 'error') {
+    if (musicAudio) stopMusic();
+    return;
+  }
+  if (musicSeq === entry.seq && musicAudio) return;
+  stopMusic();
+  const player = new Audio(mediaUrl(`/music?seq=${entry.seq}`));
+  musicAudio = player;
+  musicSeq = entry.seq;
+  const active = () => musicAudio === player && musicSeq === entry.seq;
+  let lastProgress = 0;
+  const report = (status: SongPlaybackReport, detail?: string) => {
+    if (!active()) return;
+    const positionMs = player.readyState === 0 ? playback.positionMs : player.currentTime * 1000;
+    const query = new URLSearchParams({ token, seq: String(entry.seq), state: status, at: String(Math.round(positionMs)) });
+    if (Number.isFinite(player.duration)) query.set('duration', String(Math.round(player.duration * 1000)));
+    if (detail) query.set('detail', detail);
+    // 回执按顺序发送，暂停不能被先前的进度回执覆盖。
+    musicReports = musicReports.then(() => fetch(`/music/state?${query}`, { method: 'POST', keepalive: true, signal: AbortSignal.timeout(5000) })).catch(() => {});
+  };
+  const play = () => {
+    if (!active()) return;
+    void player.play().catch((err: Error) => {
+      if (!active() || err.name === 'AbortError') return;
+      if (err.name === 'NotAllowedError') {
+        pendingMusicClick = play;
+        update((s) => ({ ...s, needsClick: true }));
+        report('blocked', '浏览器拦截了自动播放，请点击舞台上的开启声音按钮');
+      } else report('error', `音频无法播放：${err.message}`);
+    });
+  };
+  player.onloadedmetadata = () => {
+    if (!active()) return;
+    if (playback.positionMs > 0 && Number.isFinite(player.duration)) {
+      player.currentTime = Math.min(playback.positionMs / 1000, Math.max(0, player.duration - 0.25));
+    }
+  };
+  player.onplaying = () => {
+    if (!active()) return;
+    pendingMusicClick = null;
+    update((s) => ({ ...s, needsClick: !!pendingClick }));
+    report('playing');
+  };
+  player.onwaiting = () => report('loading', '音频正在缓冲');
+  player.onstalled = () => report('loading', '音频网络连接暂时停滞，正在等待缓冲');
+  player.onpause = () => { if (!player.ended && !player.error) report('paused'); };
+  player.ontimeupdate = () => {
+    if (!player.paused && !player.ended && !player.seeking && player.readyState >= 3 && Date.now() - lastProgress >= 1000) {
+      lastProgress = Date.now();
+      report('playing');
+    }
+  };
+  player.onended = () => report('ended');
+  player.onerror = () => report('error', `舞台音频加载失败（${player.error?.code ?? '未知错误'}），可跳过后重新点歌`);
+  play();
 }
 
 let alertSeq = 0;
@@ -437,9 +526,9 @@ function onLive(event: StageLiveEvent, isUpdate: boolean): void {
   update((s) => {
     let next = countLive(s, event, isUpdate);
     if (!isUpdate) {
-      if (event.kind === 'gift') next = term(next, 'gift', `${event.user.name} 送出 ${event.gift} ×${event.count}`);
-      else if (event.kind === 'superchat') next = term(next, 'sc', `${event.user.name} ¥${event.yuan}：${short(event.text, 18)}`);
-      else if (event.kind === 'membership') next = term(next, 'gift', `${event.user.name} 开通了${event.level}`);
+      if (event.kind === 'gift') next = term(next, 'gift', `${viewerName(event.user.name)} 送出 ${event.gift} ×${event.count}`);
+      else if (event.kind === 'superchat') next = term(next, 'sc', `${viewerName(event.user.name)} ¥${event.yuan}：${short(event.text, 18)}`);
+      else if (event.kind === 'membership') next = term(next, 'gift', `${viewerName(event.user.name)} 开通了${event.level}`);
     }
     return next;
   });
@@ -516,6 +605,7 @@ function handle(event: StageEvent): void {
         const step = riceOf(event.turn);
         return term(next, 'token', `这一步吃掉 ${tokenCount(event.turn)} token ≈ ${Math.max(1, step.grainsOf(event.turn))} 粒米、${energy(step.joules)}电 · 这场共 ${riceOf(event.tokens).grains.toLocaleString()} 粒米`);
       });
+    case 'finance': return update((s) => ({ ...s, finance: event.finance }));
     case 'media':
       if (event.action === 'play') {
         const { id, title, up, src, from, until, at } = event;
@@ -525,6 +615,9 @@ function handle(event: StageEvent): void {
     case 'reload': location.reload(); return;
     case 'board': return update((s) => ({ ...s, board: event.text }));
     case 'notice': return update((s) => ({ ...s, notice: event.text }));
+    case 'songs':
+      update((s) => ({ ...s, songs: event.songs }));
+      return syncMusic(event.songs);
     case 'game': return update((s) => ({ ...s, game: event.source, ...(event.source ? {} : { gameStatus: null }) }));
     case 'gameStatus': return update((s) => ({ ...s, gameStatus: event.status }));
     case 'note': return update((s) => term(s, event.tag, event.text));
@@ -572,6 +665,7 @@ export function connect(): void {
     }
   };
   source.onerror = () => {
+    stopMusic();
     update((s) => ({ ...s, connected: false }));
     // 直播中断线（插件在重启、在更新）：过一会儿还没接上就盖「更新中」
     if (!state.onAir || preview || updatingTimer) return;

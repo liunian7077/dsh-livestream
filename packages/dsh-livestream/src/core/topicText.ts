@@ -147,6 +147,63 @@ function body(topic: Topic, ctx: TopicContext): Body {
       return topic.how === 'ended'
         ? { what: [`你放的视频「${cleanText(topic.title)}」放完了（放了 ${minutes(topic.playedSec)}），舞台换回了聊天的样子。`], how: '可以说说看完的感想、问问大家觉得怎么样，或者接着聊弹幕。', maxChars: 60 }
         : { what: [`你要放的视频「${cleanText(topic.title)}」没放出来（舞台加载不了 B 站的视频地址）。`], how: '跟大家说一声，可以换一个或者接着聊。', maxChars: 40 };
+    case 'song': {
+      const who = cleanText(topic.by);
+      const asked = cleanText(topic.asked);
+      const name = topic.song ? cleanText(topic.song.name) : '';
+      const artists = topic.song?.artists.length ? cleanText(topic.song.artists.join('、')) : '';
+      const track = artists ? `《${name}》(${artists})` : `《${name}》`;
+      switch (topic.outcome) {
+        case 'loading':
+          return {
+            what: [`${who} 点了一首歌：${asked}。找到了 ${track}，已取得音源，正在等待舞台开始播放。`],
+            how: '告诉他歌找到了、正在准备播放。尚未收到播放成功回执，不要声称已经放出声音。歌手按实际版本说。',
+            maxChars: 45,
+          };
+        case 'playing':
+          return {
+            what: [`${who} 点了一首歌：${asked}。你在网易云里找到了 ${track}，现在放的就是它。`],
+            how: '跟他说一声歌找到了、现在放给他听。歌手是别人就照实说（网易云上只有这个版本）。',
+            maxChars: 45,
+          };
+        case 'queued':
+          return {
+            what: [`${who} 点了一首歌：${asked}。你在网易云里找到了 ${track}，排在队列第 ${topic.position ?? 1} 首。`],
+            how: '跟他说一声已经排上了、大概第几个。',
+            maxChars: 40,
+          };
+        case 'notfound':
+          return {
+            what: [`${who} 点了「${asked}」，你在网易云里搜了，没有找到这首歌。`],
+            how: '直接跟他说没有这首歌，可以让他换个歌名或者带上歌手再点一次。别编歌名。',
+            maxChars: 40,
+          };
+        case 'duplicate':
+          return {
+            what: [`${who} 点了「${asked}」，${track}已经在队列里了（要么正在放）。`],
+            how: '跟他说这首歌已经排上了，不用再点。',
+            maxChars: 35,
+          };
+        case 'full':
+          return {
+            what: [`${who} 点了「${asked}」，但点歌队列已经满了。`],
+            how: '跟他说队列满了，等放完几首再点。',
+            maxChars: 35,
+          };
+        case 'tooMany':
+          return {
+            what: [`${who} 已经点了几首还在队列里，又点了「${asked}」。`],
+            how: '跟他打趣一句：一次少点几首，让别人也点。语气轻松，别像在赶人。',
+            maxChars: 40,
+          };
+        default:
+          return {
+            what: [`${who} 点了「${asked}」，但连网易云的时候出错了${topic.reason ? `（${cleanText(topic.reason)}）` : ''}。`],
+            how: '跟他说一声这次没查成，等会儿再试。',
+            maxChars: 35,
+          };
+      }
+    }
     case 'resumed':
       return {
         what: [
@@ -216,7 +273,10 @@ export function topicText(topic: Topic, ctx: TopicContext): string {
   const maxChars = ctx.inGame && !['opening', 'ending', 'game'].includes(topic.kind) ? Math.min(b.maxChars, IN_GAME_MAX_CHARS) : b.maxChars;
   const playing = ctx.inGame && maxChars < b.maxChars ? '你正在玩游戏，' : '';
   const game = ctx.gameNow ? ['', `你在游戏里：${ctx.gameNow}`] : ctx.gameOff ? ['', '游戏现在没开。'] : [];
-  return [...(head ? [head, ''] : []), ...b.what, ...game, '', `${playing}${b.how}不超过 ${maxChars} 字。`].join('\n');
+  const song = topic.kind === 'song'
+    ? ['点歌已由网易云音乐队列处理。这次只口头回应结果，不要调用 search_videos、watch_video、play_video；没找到或播放失败也不要用视频代替。']
+    : [];
+  return [...(head ? [head, ''] : []), ...b.what, ...song, ...game, '', `${playing}${b.how}不超过 ${maxChars} 字。`].join('\n');
 }
 
 /** 「10月23日 22:32 开播，播了 6 小时」（北京时间） */

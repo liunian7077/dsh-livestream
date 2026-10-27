@@ -26,6 +26,7 @@ import { dropFx, type Fx } from './store';
 import type { FxEvent } from './triggers';
 import { pick } from './triggers';
 import { ArtImg, Avatar, Sparks, scTier, useArt, useStage } from './widgets';
+import { viewerName } from '../core/viewerName';
 
 export interface EffectProps {
   event: FxEvent;
@@ -129,7 +130,7 @@ function Banner({ event, options }: EffectProps) {
       <div className="ls-banner-card">
         {art && <ArtImg className="ls-banner-art" src={art} />}
         <small>{title}</small>
-        <div className="ls-banner-who"><Avatar user={event.user} /><b>{event.user.name}</b></div>
+        <div className="ls-banner-who"><Avatar user={event.user} /><b>{viewerName(event.user.name)}</b></div>
         <span>{detail}</span>
         <Sparks n={18} />
       </div>
@@ -147,7 +148,7 @@ function Welcome({ event, options }: EffectProps) {
       <div className={`ls-welcome${guard ? ` ls-welcome-guard ls-welcome-g${guard}` : ''}`}>
         <i className="ls-welcome-shine" />
         {art && <ArtImg className="ls-welcome-art" src={art} />}
-        <span>欢迎{level && <em>{level}</em>}<b>{event.user.name}</b>进入直播间～</span>
+        <span>欢迎{level && <em>{level}</em>}<b>{viewerName(event.user.name)}</b>进入直播间～</span>
         <Sparks n={14} />
       </div>
     </div>
@@ -235,7 +236,7 @@ export function Effects() {
           key={`${play.key}-${i}`}
           className={`ls-fx ls-fx-${part.options.name} ls-fx-${play.event.kind}${play.event.kind === 'superchat' ? ` ls-sc-${scTier(play.event.yuan)}` : ''}`}
           style={{ '--ls-fx-ms': `${part.ms}ms` } as Vars}
-          data-user={play.event.user.name}
+          data-user={viewerName(play.event.user.name)}
           data-text={dataText(play.event)}
           data-yuan={'yuan' in play.event ? play.event.yuan : undefined}
         >

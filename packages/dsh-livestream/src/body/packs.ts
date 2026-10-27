@@ -14,6 +14,7 @@ export interface PackEntry {
   id: string;
   name: string;
   builtin: boolean;
+  canvas?: [number, number];
 }
 
 const MANIFEST: Record<PackKind, string> = { characters: 'character.json', templates: 'template.json' };
@@ -60,16 +61,16 @@ export class Packs {
       if (!existsSync(root)) continue;
       for (const id of readdirSync(root)) {
         const manifest = this.readFrom(join(root, id, MANIFEST[kind]));
-        if (manifest) out.set(id, { id, name: manifest.name ?? id, builtin });
+        if (manifest) out.set(id, { id, name: manifest.name ?? id, builtin, ...(kind === 'templates' && manifest.canvas ? { canvas: manifest.canvas } : {}) });
       }
     }
     return [...out.values()].sort((a, b) => Number(a.builtin) - Number(b.builtin));
   }
 
-  private readFrom(file: string): { name?: string } | null {
+  private readFrom(file: string): { name?: string; canvas?: [number, number] } | null {
     if (!existsSync(file)) return null;
     try {
-      return JSON.parse(readFileSync(file, 'utf8')) as { name?: string };
+      return JSON.parse(readFileSync(file, 'utf8')) as { name?: string; canvas?: [number, number] };
     } catch {
       return null;
     }

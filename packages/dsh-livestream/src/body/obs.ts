@@ -2,7 +2,7 @@
  * OBS（WebSocket v5，OBS 28+ 自带）：专用的配置文件和场景集合「dsh-livestream」，舞台页当浏览器源，推流到 B 站。
  *
  * 画面清不清楚全看编码设置（以前 OBS 简单模式 x264 veryfast 1.4Mbps 糊过）：
- *   - 画布和输出都是 1920×1080，不缩放；舞台页本来就是 1080p
+ *   - 画布、输出和浏览器源都跟随模板尺寸（横屏 1920×1080 / 竖屏 1080×1920），不缩放
  *   - NVENC H.264 硬件编码，CBR（B 站要恒定码率，码率是设置，默认 4500 kbps），关键帧 2 秒
  *   - RTMP 开「动态码率」：网络堵的时候降码率，不丢帧（实测日本推到 B 站的 RTMP 只有 3 Mbps 左右，丢了三分之二的帧）
  *   - P6 + 高质量调优 + 两遍编码 + 心理视觉 AQ + 2 个 B 帧：码率花在文字和边缘上
@@ -150,7 +150,8 @@ function profileDir(name: string): string | null {
 }
 
 /** 切到自己的配置文件和场景集合，设好画质；舞台页当浏览器源 */
-export async function prepareObs(obs: Obs, stageUrl: string, kbps = STREAM_ENCODER.bitrate): Promise<void> {
+export async function prepareObs(obs: Obs, stageUrl: string, kbps = STREAM_ENCODER.bitrate, canvas: readonly [number, number] = [1920, 1080]): Promise<void> {
+  const [width, height] = canvas;
   // 配置文件：画质、声音
   const { profiles, currentProfileName } = await obs.call<{ profiles: string[]; currentProfileName: string }>('GetProfileList');
   if (!profiles.includes(OBS_NAME)) await obs.call('CreateProfile', { profileName: OBS_NAME });
@@ -174,7 +175,7 @@ export async function prepareObs(obs: Obs, stageUrl: string, kbps = STREAM_ENCOD
   for (const [parameterCategory, parameterName, parameterValue] of params) {
     await obs.call('SetProfileParameter', { parameterCategory, parameterName, parameterValue });
   }
-  await obs.call('SetVideoSettings', { fpsNumerator: 30, fpsDenominator: 1, baseWidth: 1920, baseHeight: 1080, outputWidth: 1920, outputHeight: 1080 });
+  await obs.call('SetVideoSettings', { fpsNumerator: 30, fpsDenominator: 1, baseWidth: width, baseHeight: height, outputWidth: width, outputHeight: height });
   // 编码器参数在配置文件目录的 streamEncoder.json 里：写好后切走再切回来，让 OBS 重新读
   const dir = profileDir(OBS_NAME);
   if (!dir) throw new Error('找不到 OBS 的 dsh-livestream 配置文件目录');
@@ -207,8 +208,8 @@ export async function prepareObs(obs: Obs, stageUrl: string, kbps = STREAM_ENCOD
   }
   const stage = {
     url: stageUrl,
-    width: 1920,
-    height: 1080,
+    width,
+    height,
     fps_custom: false,
     reroute_audio: true,
     shutdown: false,
@@ -299,15 +300,16 @@ export async function startStreaming(obs: Obs, addr: string, code: string): Prom
   throw new Error('OBS 没能开始推流（看 OBS 的日志）');
 }
 
-/** 检查 OBS：设好配置和场景，返回节目画面的一帧（PNG data URL）和当前设置；不推流 */
-export async function checkObs(obs: Obs, stageUrl: string, kbps?: number): Promise<{ image: string; video: unknown; profile: string; collection: string }> {
-  await prepareObs(obs, stageUrl, kbps);
+/** 检查 OBS：设好配置和场景，返回节目画面的一帧（JPEG data URL）和当前设置；不推流 */
+export async function checkObs(obs: Obs, stageUrl: string, kbps?: number, canvas: readonly [number, number] = [1920, 1080]): Promise<{ image: string; video: unknown; profile: string; collection: string }> {
+  await prepareObs(obs, stageUrl, kbps, canvas);
   // 等舞台页加载出来
   await sleep(4000);
   const video = await obs.call('GetVideoSettings');
   const { currentProfileName } = await obs.call<{ currentProfileName: string }>('GetProfileList');
   const { currentSceneCollectionName } = await obs.call<{ currentSceneCollectionName: string }>('GetSceneCollectionList');
-  const shot = await obs.call<{ imageData: string }>('GetSourceScreenshot', { sourceName: SCENE, imageFormat: 'jpg', imageWidth: 960, imageHeight: 540, imageCompressionQuality: 85 });
+  const scale = 960 / Math.max(...canvas);
+  const shot = await obs.call<{ imageData: string }>('GetSourceScreenshot', { sourceName: SCENE, imageFormat: 'jpg', imageWidth: Math.round(canvas[0] * scale), imageHeight: Math.round(canvas[1] * scale), imageCompressionQuality: 85 });
   return { image: shot.imageData, video, profile: currentProfileName, collection: currentSceneCollectionName };
 }
 

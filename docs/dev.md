@@ -6,7 +6,7 @@
 |---|---|---|---|
 | `src/console/` | `lib/client.js` | DSH 网页外壳（侧栏「直播」→ 控制台） | DSH 自带的热更新换掉控制台插件（1 秒内），不用重启 |
 | `src/stage/`、`stage/index.html`、`stage/stage.css` | `lib/stage.js`、`stage/stage.css` | 插件自己的舞台服务器（OBS 浏览器源、控制台预览） | 舞台服务器让开着的页面自己刷新 |
-| `src/dsh/`、`src/body/`、`src/core/` | `lib/index.js`、`lib/agent.js`、`lib/chunks/` | DSH 宿主进程 | 要重启 DSH（见下面「宿主端」） |
+| `src/dsh/`、`src/body/`、`src/core/` | `lib/index.js`、`lib/agent.js`、`lib/chunks/` | DSH 宿主进程 | 加载开发 HMR patch 后，框架自动卸载旧插件、加载新代码 |
 
 ## 第一次准备
 
@@ -32,6 +32,24 @@ pnpm -C packages/dsh-livestream dev
 配置在 [`packages/dsh-livestream/tsdown.config.ts`](../packages/dsh-livestream/tsdown.config.ts)，
 三块代码各自的配置在 [`build/config.ts`](../packages/dsh-livestream/build/config.ts)。窗口不要关，`Ctrl+C` 结束。
 
+首次构建完成后，在仓库根目录另开一个终端启动 DSH：
+
+```bash
+dsh web --patch ./packages/dsh-livestream/lib/cordis.hmr.patch.yml
+```
+
+如果终端已在插件目录 `packages/dsh-livestream/`，使用：
+
+```bash
+dsh web --patch ./lib/cordis.hmr.patch.yml
+```
+
+`--patch` 的相对路径从当前终端目录解析；也可以传配置文件的绝对路径。
+
+`dev` 自动生成这份 patch，里面是当前 checkout 的 `lib/` 绝对路径；不需要手改 DSH 主目录的配置。
+已有的启动命令只要追加 `--patch <这份文件的路径>` 即可。桌面版等不方便传启动参数的场景，
+也可以把生成文件的内容追加到对应 profile 的 `cordis.patch.yml`。
+
 - `pnpm -C packages/dsh-livestream dev`：宿主端 + 控制台 + 舞台页都盯着。
 - `pnpm -C packages/dsh-livestream dev:web`：只盯控制台和舞台页（只调页面时更快）。
 - `pnpm -C packages/dsh-livestream build`：正式构建（先清空 `lib/`，再压缩、不带 sourcemap）。
@@ -40,7 +58,8 @@ pnpm -C packages/dsh-livestream dev
 DSH 按 `package.json` 的 `exports` 加载前两个，舞台页的 `index.html` 直接引 `/stage.js`，所以别改。
 `tools/*.ts` 那些一次性的开发脚本还是用 `npx esbuild` 打包（见各脚本开头的用法），和插件构建无关。
 
-舞台页的热刷新长在舞台服务器里，所以更新插件代码后要重启一次 DSH；之后调页面就不用再重启了。
+开发 watch 使用固定的共享 chunk 文件名，让 HMR 能沿已加载的模块依赖同时替换根插件和 agent，避免两边拿到不同的运行时。
+正式构建仍使用带 hash 的 chunk 文件名；切换正式构建和开发 watch 后，重新启动一次 DSH。
 
 ## 舞台页
 
@@ -77,25 +96,31 @@ DSH 按 `package.json` 的 `exports` 加载前两个，舞台页的 `index.html`
 - 桌面版打开 DevTools：菜单里的开发者工具，或 `Cmd+Opt+I`（Windows 是 `Ctrl+Shift+I`）。
   控制台的源码同样有 sourcemap，断点可以打在 `src/console/console.tsx` 上。
 
+## 舞台收支
+
+控制台「设置 → 余额与礼物收入」填写初始 API 余额并保存。剩余余额按初始金额减去累计模型费用估算，不是官方账户余额；礼物收入单独统计，不抵扣模型费，也不包含平台分成后的结算。
+
+模型费按 DeepSeek V4.1 Flash 的官方人民币费率计算：每百万 token，高峰缓存命中输入 ¥0.04、未缓存输入 ¥2、输出 ¥8，空闲时段半价。北京时间周一至周五 9–12、14–18 点为高峰，节假日除外；当前节假日日历覆盖 2026 年。DSH 的 `inputTokens` 已是未命中输入，缓存读取另计。其他未支持的模型只统计 token，不扣入余额；配音费也不在该余额中扣减。价格来源：[DeepSeek 官方定价](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)。
+
+价格规则必须选择「礼物消息」或「弹幕文本」，同名不同来源可配置不同单价。礼物按单价乘数量，未配置时采用平台面值；弹幕仅完整匹配文本时计一次。连击按新增金额计入，模拟事件不入账。改价只影响之后的新事件。
+
+设置保存在 `$DSH_HOME/dsh-livestream/settings.json`，账本保存在同目录的 `finance.json`。按北京时间区分每日费用、礼物收入和弹幕规则收入；历史累计扣费、余额和去重信息在重启后保留。
+
 ## 宿主端
 
 `src/dsh/`、`src/body/`、`src/core/` 编译进 `lib/index.js` / `lib/agent.js`，由 DSH 宿主进程加载。
-`dev` 会重建，但宿主不会自己换代码：重启 DSH。
+按照框架的 [HMR 接入方式](https://deepseek-harness.github.io/deepseek-harness/develop/framework/#hmr-热模块替换)，
+开发 patch 启用 base 组合包已有的 `hmr` 条目（`@deepseek-ai/dsh-hmr`），监听插件的 `lib/`。
+DSH base 同时提供它依赖的 `timer` 服务；单独组装 Cordis 的宿主还需要加载 timer 和 loader。
 
-- 开发机是 Windows（`tools/restart-dsh.sh` 那套）：`bash tools/restart-dsh.sh`。
-- 桌面版：退出后重新打开。
-- 如果想让宿主端也自动重载，可以在 DSH 的 profile patch
-  （`$DSH_HOME/profiles/<profile>/cordis.patch.yml`）里让 HMR 盯插件的 `lib`：
+保存源码后，tsdown 重建，HMR 将 300ms 内的变动合并，再替换受影响的宿主插件。
+`.map`、`client.js`、`stage.js` 不触发宿主重载，两个页面继续使用各自已有的热更新。
+卸载时会停止轮询、点歌播放和旧的控制台事件流，释放 OBS 连接，并等舞台端口关闭后再启动新实例。
 
-  ```yaml
-  - id: hmr
-    disabled: false
-    config:
-      root: ["/绝对路径/packages/dsh-livestream/lib"]
-  ```
+宿主 HMR 用于开发调试：舞台连接会重建，点歌队列会清空，已有的断点续播逻辑会尝试恢复直播会话。
+正式运行用 `pnpm build`，启动时去掉这份开发 patch。它只在 `dev` 下生成，正式构建会清掉它。
 
-  这是 DSH 宿主侧的热重载：`lib/index.js` 一变，插件会被停掉再加载一次。直播中的会话、
-  推流这些状态会跟着断一下，调试宿主时用，别在正式直播时开。
+正常重载时 DSH 日志会出现 `reload plugin at ...`；没有加载开发 patch 时，宿主代码仍需要手动重启 DSH。
 
 ## 常用命令
 
@@ -116,6 +141,19 @@ pnpm -C packages/dsh-livestream build      # 正式构建
   `DSH_DOUYIN_SIGN_FILE=<新文件路径>` 试，不用重新构建。
 - 抖音没有礼物：礼物只推给登录态的连接。控制台会提示「收不到礼物」；填一份含
   `sessionid_ss` 的抖音 Cookie（DSH 凭据 `DOUYIN_COOKIE`）后重连。
+- 点歌没反应：先看控制台「点歌」是不是开着，再确认 OBS 舞台浏览器源已打开。
+  搜索走 `music.163.com/api/search/get`，音源走 `api/song/enhance/player/url`，由舞台服务器的
+  `/music?seq=…&token=…` 转发音频（支持 Range），无需桌面客户端或辅助功能权限。
+- 点歌显示「等待舞台播放」：控制台预览 `?preview=1` 保持静音、不发播放回执。请打开正式舞台页；
+  普通浏览器可能拦截自动播放，点击舞台上的「开启声音」。OBS 的浏览器源应开启音频输出。
+- 点歌显示「播放失败」：检查网络和具体错误。可在控制台保存 DSH 凭据 `NETEASE_COOKIE`，
+  使用该账号有权播放的完整音源；无版权、无权限或只有试听会明确报错，可手动跳过后重新点歌。
+  音源只在轮到这首时获取，Cookie 和上游音频地址不发到舞台。
+- 点歌进度与自动切歌：舞台音频通过 `/music/state` 上报真实播放、暂停、缓冲、结束和错误。
+  只有收到播放回执才显示「正在播放」，收到 `ended` 才自动换歌，不按歌曲时长猜测。
+  舞台断线时暂停，重连按最近一次回传的位置续播；跳歌后旧歌曲的回执会被忽略。
+- 点歌总说「没有这首歌」：网易云没有那首歌的版权时确实搜不到（例如很多周杰伦原唱）。
+  搜到的是同名翻唱时会照实报歌手名。让观众把歌名或歌手写全一点再试。
 - 端口被占：改 `$DSH_HOME/dsh-livestream/settings.json` 里的 `stagePort`，或在控制台设置里改。
 - 侧栏没有「直播」条目、打开 DSH 报 `web boot: 1 entry did not activate` /
   `dsh-livestream: import failed: client-modules: require("fs") missed the module table`：
@@ -128,6 +166,9 @@ pnpm -C packages/dsh-livestream build      # 正式构建
   再刷新一次 DSH 页面；仍然不行就重启 DSH。
 - 舞台页不刷新：看 DSH 日志里有没有「舞台页的代码或样式重建了」。只在 `lib/stage.js`、
   `stage/index.html` 或 `stage/stage.css` 变化时推刷新；只改模板素材要手动刷新。
+- 宿主端不热更新：先确认运行的是 `dev`，启动命令加载了 `lib/cordis.hmr.patch.yml`，
+  且 DSH 日志里 `hmr watching` 的路径是当前 checkout 的 `lib/`。切换构建模式后重启一次 DSH。
+  报 `--expose-internals is required for HMR service` 时，使用 DSH 自带的启动器启动。
 - 改了 `tsdown.config.ts`、`build/config.ts`、`package.json`、`cordis.patch.yml`：重启 `pnpm dev`；
   `package.json` 的改动还要重启 DSH。
 

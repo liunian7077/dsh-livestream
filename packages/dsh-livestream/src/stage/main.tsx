@@ -9,7 +9,7 @@ import { arrange, type Mode, type Slot } from './layout';
 import type { WidgetType } from './protocol';
 import { assetUrl, connect, preview, unlockAudio } from './store';
 import { Effects } from './effects';
-import { AiLabel, Alerts, Board, Character, Chat, Game, Notice, Reply, Rice, Scene, Status, Subtitle, SUBTITLE_LINGER_MS, Terminal, useLinger, useStage, Video } from './widgets';
+import { AiLabel, Alerts, Board, Character, Chat, Game, Notice, Playlist, Reply, Rice, Scene, Status, Subtitle, SUBTITLE_LINGER_MS, Terminal, useLinger, useStage, Video } from './widgets';
 
 const WIDGETS: Record<WidgetType, React.ComponentType<{ options?: Record<string, unknown> }>> = {
   character: Character,
@@ -26,6 +26,7 @@ const WIDGETS: Record<WidgetType, React.ComponentType<{ options?: Record<string,
   video: Video,
   board: Board,
   game: Game,
+  playlist: Playlist,
 };
 
 function useViewport(): { width: number; height: number } {
@@ -60,7 +61,7 @@ function Placed({ p, covered = false }: { p: Slot; covered?: boolean }) {
 }
 
 /** 整块画布去掉一个矩形（evenodd：外框和洞各画一圈） */
-function holePath(s: Slot, cw: number, ch: number): string {
+function holePath(s: Pick<Slot, 'x' | 'y' | 'w' | 'h'>, cw: number, ch: number): string {
   const x1 = s.x, y1 = s.y, x2 = s.x + (s.w ?? cw), y2 = s.y + (s.h ?? ch);
   return `polygon(evenodd, 0 0, ${cw}px 0, ${cw}px ${ch}px, 0 ${ch}px, 0 0, ${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ${x2}px ${y1}px, ${x1}px ${y1}px)`;
 }
@@ -97,11 +98,16 @@ function App() {
   const gameSlot = mode === 'game' && game && 'window' in game ? slots.find((s) => s.type === 'game') : undefined;
   const hole: React.CSSProperties | undefined = gameSlot ? { clipPath: holePath(gameSlot, cw, ch) } : undefined;
   const scale = Math.min(width / cw, height / ch);
+  const left = (width - cw * scale) / 2;
+  const top = (height - ch * scale) / 2;
+  const portrait = ch > cw;
   return (
-    <div className="ls-viewport">
+    <div className={`ls-viewport${portrait ? ` ls-template-${template.id}` : ''}`}>
+      {/* 竖屏窗口比例不同时，用同一背景补满边缘；中间留空，保留 OBS 游戏窗口的透明区域。 */}
+      {portrait && <div className="ls-backdrop" style={{ clipPath: holePath({ x: left, y: top, w: cw * scale, h: ch * scale }, width, height) }} />}
       <div
         className={`ls-canvas ls-template-${template.id} ls-mode-${mode}`}
-        style={{ width: cw, height: ch, transform: `scale(${scale})`, left: (width - cw * scale) / 2, top: (height - ch * scale) / 2, ...template.theme } as React.CSSProperties}
+        style={{ width: cw, height: ch, transform: `scale(${scale})`, left, top, ...template.theme } as React.CSSProperties}
       >
         {/* 背景和前景各几层空的 div：模板拿它们（和各自的 ::before / ::after）画光、气泡、云……，挂件在中间 */}
         <div className="ls-backdrop" style={hole}><i className="ls-layer ls-layer-1" /><i className="ls-layer ls-layer-2" /><i className="ls-layer ls-layer-3" /></div>

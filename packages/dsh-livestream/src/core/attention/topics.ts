@@ -44,6 +44,23 @@ export type TopicBody =
   | { kind: 'owner'; text: string; interrupted?: string; who?: string }
   /** 她在舞台上放的视频放完了（error：没放出来）；playedSec 是放了多久 */
   | { kind: 'video'; title: string; how: 'ended' | 'error'; playedSec: number }
+  /**
+   * 有人点歌：搜到就准备播放或排队（loading/queued），舞台确认后才是 playing。
+   * song 是最终放进网易云的那首（歌名/歌手以平台上的为准，可能是翻唱）。
+   */
+  | {
+    kind: 'song';
+    outcome: 'loading' | 'playing' | 'queued' | 'notfound' | 'duplicate' | 'full' | 'tooMany' | 'error';
+    /** 观众点的原话（点歌后面那段） */
+    asked: string;
+    /** 谁点的 */
+    by: string;
+    song?: { name: string; artists: string[] };
+    /** 排在队列里第几位（queued 时有） */
+    position?: number;
+    /** error 时的原因 */
+    reason?: string;
+  }
   /** 直播插件重启了（主人在更新），断了 gapSec 秒，这场接着播 */
   | { kind: 'resumed'; gapSec: number; playing?: boolean }
   /** 她在直播里开着的游戏：这一轮她停下了、直播间也没事，叫她接着玩 */

@@ -102,14 +102,51 @@ export type EffectSpec = string | { name: string; ms?: number; [option: string]:
 
 /**
  * reply：「她在回」卡片（她正在回应的那几位观众和他们说的话；热闹时那条弹幕早滚出弹幕列表了）
- * rice：她吃了多少饭（这场用掉的 token 换算成电、再换算成米饭）
+ * rice：今天的模型费用、API 余额与礼物收入
  * terminal：终端，滚动显示身体和大脑在干什么（推了什么给她、她想了多久、用了多少 token）
  * scene：整屏的过场：开播前的等待画面、开场动画、下播谢幕（放在画布 0,0，宽高和画布一样）
  * video：放视频的画面（她在放视频时才有，放在 layouts.video 里）
  * game：她在玩的游戏的画面位（她在直播里玩游戏时才有）：网页画面直接放这里；游戏窗口由 OBS 抓来叠在这一块上
  * effects：整屏特效层：进场、礼物、上舰时放的彩带、横幅……（放在画布 0,0，宽高和画布一样，排在 scene 前面）
+ * playlist：当前播放的音乐和观众点歌队列
  */
-export type WidgetType = 'character' | 'subtitle' | 'chat' | 'alerts' | 'status' | 'ai-label' | 'reply' | 'rice' | 'terminal' | 'scene' | 'video' | 'effects' | 'board' | 'game';
+export type WidgetType = 'character' | 'subtitle' | 'chat' | 'alerts' | 'status' | 'ai-label' | 'reply' | 'rice' | 'terminal' | 'scene' | 'video' | 'effects' | 'board' | 'game' | 'playlist';
+
+/** 舞台和控制台共用的点歌信息，不带观众内部 id */
+export interface StageSong {
+  seq: number;
+  id: string;
+  name: string;
+  artists: string[];
+  album: string;
+  durationMs: number;
+  by: string;
+  requestedAt: number;
+  startedAt?: number;
+}
+
+export interface StageSongs {
+  enabled: boolean;
+  playing: StageSong | null;
+  waiting: StageSong[];
+  playback: SongPlayback | null;
+}
+
+export type SongPlaybackStatus = 'resolving' | 'loading' | 'playing' | 'paused' | 'blocked' | 'error';
+export type SongPlaybackReport = Exclude<SongPlaybackStatus, 'resolving'> | 'ended';
+
+/** 来自舞台音频元素的真实位置；未收到 playing 前不算开始播放。 */
+export interface SongPlayback {
+  status: SongPlaybackStatus;
+  positionMs: number;
+  durationMs: number;
+  updatedAt: number;
+  detail?: string;
+}
+
+export const SONG_PLAYBACK_LABELS: Record<SongPlaybackStatus, string> = {
+  resolving: '获取音源', loading: '等待舞台播放', playing: '正在播放', paused: '已暂停', blocked: '等待允许播放', error: '播放失败',
+};
 
 /**
  * 游戏画面从哪来（dsh-game 给的，见 docs/game-live-contract.md）：
@@ -160,6 +197,25 @@ export type StageLiveEvent =
 /** 大脑现在在干什么：舞台上「正在想…」的提示用 */
 export type BrainState = 'off' | 'listening' | 'thinking' | 'speaking' | 'away';
 
+/** 单价以人民币元计；弹幕规则完整匹配整条文字，每条记一次。 */
+export interface GiftPrice {
+  source: 'gift' | 'chat';
+  name: string;
+  yuan: number;
+}
+
+/** 宿主按北京时间持久记账；余额仅扣模型费，礼物收入单列。 */
+export interface StageFinance {
+  date: string;
+  todayCostYuan: number;
+  totalCostYuan: number;
+  balanceYuan: number | null;
+  todayGiftYuan: number;
+  todayChatGiftYuan: number;
+  todayTokens: number;
+  unpricedTokens: number;
+}
+
 export type StageEvent =
   /** build：舞台页代码的版本（插件更新后变）；连上时先发 */
   | { v: 1; type: 'hello'; character: CharacterManifest; template: TemplateManifest; build?: string; at: number }
@@ -177,6 +233,8 @@ export type StageEvent =
   | { v: 1; type: 'board'; text: string; at: number }
   /** 滚动通知（主人在控制台写的，出状况时告诉观众）；空串收起 */
   | { v: 1; type: 'notice'; text: string; at: number }
+  /** 点歌状态；队列变化时更新，中途打开舞台时补发 */
+  | { v: 1; type: 'songs'; songs: StageSongs; at: number }
   /** isUpdate：同 id 再来一次（礼物连击累加） */
   | { v: 1; type: 'live'; event: StageLiveEvent; isUpdate: boolean; at: number }
   /** 她正在回应这几位观众（弹幕流里高亮） */
@@ -184,6 +242,7 @@ export type StageEvent =
   | { v: 1; type: 'room'; online?: number; title?: string; onAir: boolean; at: number }
   /** 这场直播她用掉的 token（累计）；turn 是刚结束的这一步用的，model 是哪个模型 */
   | { v: 1; type: 'usage'; tokens: number; turn?: number; model?: string; at: number }
+  | { v: 1; type: 'finance'; finance: StageFinance; at: number }
   /**
    * 放视频（她用 play_video）：舞台换成 video 布局，从 from 秒放到 until 秒；她说话时视频声音调小。
    * 中途连上的舞台从 from + (现在 - at) 接着放。stop：停下、换回平时的布局

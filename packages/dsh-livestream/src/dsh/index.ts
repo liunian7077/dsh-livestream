@@ -16,17 +16,18 @@ import { checkObs, connectObs } from '../body/obs';
 import { pollQrLogin, startQrLogin, whoIs } from '../body/biliLogin';
 import { SIMULATED_PREFIX } from '../body/show';
 import type { LiveEvent, LiveUser } from '../core/live';
-import type { GameSource, StageEvent } from '../stage/protocol';
+import type { GameSource, GiftPrice, StageEvent } from '../stage/protocol';
 import { splitByMood } from '../core/moodText';
 import { speakable } from '../core/speakable';
 import { GUEST_VOICE } from '../body/voices';
-import { agentReady, asr, broadcast, cookie, cookieFor, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, SECRETS, social, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, type Pace, type Settings } from './runtime';
+import { agentReady, asr, broadcast, cookie, cookieFor, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, publishSongs, SECRETS, social, songbook, songView, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, watchInbox, type Pace, type Settings } from './runtime';
+import { finance, publishFinance } from './runtime';
 
 export const name = 'dsh-livestream';
 export const inject = ['connection'];
 
 interface HostContext {
-  effect(effect: () => () => void, label?: string): unknown;
+  effect(effect: () => () => void | Promise<void>, label?: string): unknown;
   [service: string]: any;
 }
 
@@ -47,10 +48,20 @@ function state() {
     show: show.status(),
     broadcast: broadcast.status(),
     settings: { ...settings, stageToken: undefined },
+    finance: finance.snapshot(),
     stageUrl: server.url,
     characters: packs.list('characters'),
     templates: packs.list('templates'),
     asr: { available: asr.available },
+    songs: {
+      enabled: settings.songRequest,
+      playing: songbook.playing ? songView(songbook.playing) : null,
+      waiting: songbook.waiting.map(songView),
+      playback: songbook.playback,
+      recent: songbook.recent.map(songView),
+      max: settings.songQueueMax,
+      perUser: settings.songPerUserMax,
+    },
     defaultBoard: DEFAULT_BOARD,
   };
 }
@@ -95,8 +106,6 @@ function simulated(input: { kind?: string; name?: string; text?: string; gift?: 
   }
 }
 
-/** 下播后等她道别说完再停推 */
-let waitingOffair: NodeJS.Timeout | null = null;
 /** 舞台的谢幕画面放多久（stage/store.ts 的 ENDING_MS 是 16 秒）：放完再停推流 */
 const ENDING_SCENE_MS = 17_000;
 
@@ -127,7 +136,8 @@ async function resumeLive(ctx: HostContext, stopped: () => boolean): Promise<voi
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
-  if (!resumed || stopped()) {
+  if (stopped()) return;
+  if (!resumed) {
     show.closeStale(saved);
     return;
   }
@@ -143,7 +153,10 @@ async function resumeLive(ctx: HostContext, stopped: () => boolean): Promise<voi
   }
   // 等 agent 子插件把推消息的钩子装上
   while (!stopped() && Date.now() < deadline && !agentReady()) await new Promise((r) => setTimeout(r, 500));
-  if (saved.roomId) show.connect(settings.platform, saved.roomId, await cookieFor(settings.platform), settings.ownRooms.includes(saved.roomId));
+  if (stopped()) return;
+  const roomCookie = saved.roomId ? await cookieFor(settings.platform) : '';
+  if (stopped()) return;
+  if (saved.roomId) show.connect(settings.platform, saved.roomId, roomCookie, settings.ownRooms.includes(saved.roomId));
   show.resumeLive(saved);
   if (saved.broadcasting && saved.roomId) await broadcast.adopt(saved.roomId);
   const pushing = saved.broadcasting ? `，推流${broadcast.streaming ? '接上了' : '没接上（OBS 已经不在推了）'}` : '（彩排，没在推流）';
@@ -151,18 +164,35 @@ async function resumeLive(ctx: HostContext, stopped: () => boolean): Promise<voi
 }
 
 export function apply(ctx: HostContext): void {
+  let waitingOffair: NodeJS.Timeout | null = null;
+  let endingTimer: NodeJS.Timeout | null = null;
+  const eventStreams = new Set<() => void>();
   ctx.effect(() => {
-    server.start().catch((err) => console.warn(`[dsh-livestream] 舞台服务器起不来（端口 ${settings.stagePort}）：${(err as Error).message}`));
-    return () => server.stop();
-  }, 'dsh-livestream stage server');
-  ctx.effect(() => () => show.dispose(), 'dsh-livestream show');
+    const started = server.start().catch((err) => console.warn(`[dsh-livestream] 舞台服务器起不来（端口 ${settings.stagePort}）：${(err as Error).message}`));
+    const stopInbox = watchInbox();
+    // 无弹幕、无模型请求时也要在北京时间跨日后更新面板。
+    const financeTimer = setInterval(publishFinance, 15_000);
+    return async () => {
+      clearInterval(financeTimer);
+      stopInbox();
+      if (waitingOffair) clearInterval(waitingOffair);
+      if (endingTimer) clearTimeout(endingTimer);
+      for (const close of eventStreams) close();
+      // 先保存还在推流的状态，再释放旧连接；这些清理有顺序，放在同一个 disposer 里。
+      show.dispose();
+      songbook.stop();
+      broadcast.dispose();
+      asr.close();
+      await started;
+      await server.stop();
+    };
+  }, 'dsh-livestream runtime');
   // 断点续播：上次停下时还在播（DSH 重启、更新插件），接着播
   ctx.effect(() => {
     let stopped = false;
     void resumeLive(ctx, () => stopped).catch((err) => console.warn(`[dsh-livestream] 接着播失败：${(err as Error).message}`));
     return () => { stopped = true; };
   }, 'dsh-livestream resume');
-  ctx.effect(() => () => asr.close(), 'dsh-livestream asr');
   // 直播身体：给 dsh-game 用（约定见 docs/game-live-contract.md）。在播时她的话由这里念、游戏画面由这里放上舞台
   ctx.provide('liveBody', {
     get onAir() { return show.isOnAir; },
@@ -193,7 +223,11 @@ export function apply(ctx: HostContext): void {
       next.character = String(patch.character);
     }
     if (patch.template !== undefined) {
-      if (!packs.template(String(patch.template))) return fail('没有这个模板');
+      const template = packs.template(String(patch.template));
+      if (!template) return fail('没有这个模板');
+      const currentCanvas = packs.template(settings.template)?.canvas ?? [1920, 1080];
+      const resizing = template.canvas.some((size, i) => size !== currentCanvas[i]);
+      if (resizing && ['preparing', 'face', 'streaming', 'stopping'].includes(broadcast.status().phase)) return fail('切换横竖屏前，请先停止推流；重新开播时会自动设置 OBS 尺寸。');
       next.template = String(patch.template);
     }
     if (patch.voice !== undefined) next.voice = String(patch.voice).trim();
@@ -211,6 +245,31 @@ export function apply(ctx: HostContext): void {
     if (patch.asrModel !== undefined) next.asrModel = String(patch.asrModel).trim() || 'large-v3-turbo';
     if (patch.boardText !== undefined) next.boardText = String(patch.boardText).replace(/\r/g, '').slice(0, 1000);
     if (patch.noticeText !== undefined) next.noticeText = String(patch.noticeText).replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (patch.songRequest !== undefined) next.songRequest = !!patch.songRequest;
+    if (patch.songQueueMax !== undefined) next.songQueueMax = Math.max(1, Math.min(100, Number(patch.songQueueMax) || 20));
+    if (patch.songPerUserMax !== undefined) next.songPerUserMax = Math.max(1, Math.min(5, Number(patch.songPerUserMax) || 2));
+    if (patch.initialBalanceYuan !== undefined) {
+      if (patch.initialBalanceYuan === null) next.initialBalanceYuan = null;
+      else {
+        const amount = Number(patch.initialBalanceYuan);
+        if (!Number.isFinite(amount) || amount < 0 || amount > 1e9) return fail('初始余额要在 0～10 亿元之间');
+        next.initialBalanceYuan = amount;
+      }
+    }
+    if (patch.giftPrices !== undefined) {
+      if (!Array.isArray(patch.giftPrices) || patch.giftPrices.length > 100) return fail('礼物价格最多配置 100 条');
+      const rules: GiftPrice[] = [];
+      const seen = new Set<string>();
+      for (const r of patch.giftPrices) {
+        if (!r || (r.source !== 'gift' && r.source !== 'chat') || typeof r.name !== 'string' || !r.name.trim() || r.name.trim().length > 100 || typeof r.yuan !== 'number' || !Number.isFinite(r.yuan) || r.yuan < 0 || r.yuan > 1e6) return fail('每条规则需要来源、名称和有效的非负单价（元）');
+        const name = r.name.trim();
+        const key = `${r.source}:${name}`;
+        if (seen.has(key)) return fail('同一来源的名称不能重复');
+        seen.add(key);
+        rules.push({ source: r.source, name, yuan: r.yuan });
+      }
+      next.giftPrices = rules;
+    }
     const own = (patch as { ownRoom?: boolean }).ownRoom;
     if (own !== undefined && settings.roomId) {
       const rooms = new Set(settings.ownRooms);
@@ -222,8 +281,10 @@ export function apply(ctx: HostContext): void {
     // 换了 Python 或模型：关掉正在跑的识别进程，下次用新的
     if ((next.asrPython !== undefined && next.asrPython !== settings.asrPython) || (next.asrModel !== undefined && next.asrModel !== settings.asrModel)) asr.close();
     updateSettings(next);
+    if (next.initialBalanceYuan !== undefined || next.giftPrices !== undefined) publishFinance();
     if (next.boardText !== undefined) publishBoard();
     if (next.noticeText !== undefined) publishNotice();
+    if (next.songRequest !== undefined) publishSongs();
     if (next.character) show.setNames(currentCharacter()?.names ?? []);
     if (repaint) show.stage.broadcast({ type: 'reload' });
     // 换了主题，游戏位可能挪了：OBS 里的游戏画面跟着挪
@@ -242,6 +303,17 @@ export function apply(ctx: HostContext): void {
     return json(state());
   }, 'disconnect');
 
+  // 点歌队列：主人在控制台手点「下一首」，或清掉排队的
+  route('/api/dsh-livestream/songs/next', ['POST'], async () => {
+    await songbook.next();
+    return json(state());
+  }, 'songs next');
+
+  route('/api/dsh-livestream/songs/clear', ['POST'], () => {
+    songbook.clear();
+    return json(state());
+  }, 'songs clear');
+
   route('/api/dsh-livestream/onair', ['POST'], async (request) => {
     const { sessionId, gameSessionId } = await body<{ sessionId?: string; gameSessionId?: string }>(request);
     if (!sessionId) return fail('缺她直播用的会话');
@@ -255,13 +327,14 @@ export function apply(ctx: HostContext): void {
 
   route('/api/dsh-livestream/offair', ['POST'], () => {
     show.endLive();
+    songbook.stop();
     // 在推流：等她道别说完（这场结束），舞台放完谢幕，再停推、下播（以前一说完就断，观众看不到谢幕）
     if (broadcast.streaming && !waitingOffair) {
       waitingOffair = setInterval(() => {
         if (show.isOnAir) return;
         if (waitingOffair) clearInterval(waitingOffair);
         waitingOffair = null;
-        setTimeout(() => void broadcast.stop(), ENDING_SCENE_MS);
+        endingTimer = setTimeout(() => { endingTimer = null; void broadcast.stop(); }, ENDING_SCENE_MS);
       }, 1000);
     }
     return json(state());
@@ -283,7 +356,7 @@ export function apply(ctx: HostContext): void {
     try {
       const obs = await connectObs(true);
       try {
-        return json({ ok: true, ...(await checkObs(obs, server.url, settings.streamKbps)) });
+        return json({ ok: true, ...(await checkObs(obs, server.url, settings.streamKbps, packs.template(settings.template)?.canvas)) });
       } finally {
         obs.close();
       }
@@ -358,8 +431,16 @@ export function apply(ctx: HostContext): void {
   route('/api/dsh-livestream/events', ['GET'], () => {
     let unsubscribe: (() => void) | null = null;
     let tick: NodeJS.Timeout | null = null;
+    let close: () => void;
+    const cleanup = () => {
+      unsubscribe?.();
+      if (tick) clearInterval(tick);
+      eventStreams.delete(close);
+    };
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
+        close = () => { cleanup(); controller.close(); };
+        eventStreams.add(close);
         const enc = new TextEncoder();
         const send = (text: string) => { try { controller.enqueue(enc.encode(text)); } catch { /* 已关闭 */ } };
         unsubscribe = show.stage.subscribe((event: StageEvent) => {
@@ -373,10 +454,7 @@ export function apply(ctx: HostContext): void {
         tick = setInterval(status, 1000);
         status();
       },
-      cancel() {
-        unsubscribe?.();
-        if (tick) clearInterval(tick);
-      },
+      cancel: cleanup,
     });
     return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' } });
   }, 'events');

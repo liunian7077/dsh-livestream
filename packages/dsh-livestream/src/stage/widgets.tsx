@@ -5,9 +5,11 @@
 
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CharacterManifest, StageLiveEvent, StageUser } from './protocol';
+import { SONG_PLAYBACK_LABELS } from './protocol';
 import { assetUrl, dropAlert, energy, riceOf, getState, litChars, mediaUrl, preview, reportMedia, subscribe, type Alert, type ReplyItem, type StageState } from './store';
 import { giftTier } from './triggers';
 import { clipBox, clipVideoStyle } from './layout';
+import { viewerName } from '../core/viewerName';
 
 export function useStage(): StageState {
   return useSyncExternalStore(subscribe, getState);
@@ -417,7 +419,7 @@ export function Subtitle({ options }: { options?: Record<string, unknown> }) {
       {quoted && (
         <div className="ls-quote" key={quoted.key}>
           <Avatar user={quoted.event.user} />
-          <b>{quoted.event.user.name}{reply.length > 1 ? ` 等 ${reply.length} 人` : ''}</b>
+          <b>{viewerName(quoted.event.user.name)}{reply.length > 1 ? ` 等 ${reply.length} 人` : ''}</b>
           <span>{eventText(quoted.event)}</span>
         </div>
       )}
@@ -469,10 +471,12 @@ export function Chat({ options }: { options?: Record<string, unknown> }) {
   const limit = Number(options?.rows ?? 12);
   const rows = chats.slice(-limit);
   const title = options?.title === undefined ? '弹幕' : options.title;
+  const list = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (list.current) list.current.scrollTop = list.current.scrollHeight; }, [chats]);
   return (
     <div className="ls-chat">
       {title !== false && <div className="ls-chat-head"><span>{String(title)}</span></div>}
-      <div className="ls-chat-list">
+      <div className="ls-chat-list" ref={list}>
         {rows.map((row) => {
           const { user } = row.event;
           const focused = focus.has(user.id);
@@ -480,7 +484,7 @@ export function Chat({ options }: { options?: Record<string, unknown> }) {
             <div key={row.id} className={`ls-chat-row${focused ? ' ls-focused' : ''}${user.guard ? ` ls-row-guard ls-row-guard-${user.guard}` : ''}`}>
               <Avatar user={user} />
               <div className="ls-chat-body">
-                <div className="ls-chat-name"><Badge user={user} /><span className="ls-name">{user.name}</span>{focused && <em className="ls-replying"><Voice />正在回你</em>}</div>
+                <div className="ls-chat-name"><Badge user={user} /><span className="ls-name">{viewerName(user.name)}</span>{focused && <em className="ls-replying"><Voice />正在回你</em>}</div>
                 {row.event.sticker ? <img className="ls-sticker" src={row.event.sticker} referrerPolicy="no-referrer" alt={row.event.text} /> : <div className="ls-chat-text">{row.event.text}</div>}
               </div>
             </div>
@@ -538,7 +542,7 @@ export function Board({ options }: { options?: Record<string, unknown> }) {
   const [heading, ...items] = pages[page % pages.length];
   const title = options?.title === undefined ? '告示板' : options.title;
   return (
-    <div className="ls-board">
+    <div className={`ls-board${options?.compact ? ' ls-board-compact' : ''}`}>
       {title !== false && <div className="ls-board-head"><span>{String(title)}</span></div>}
       <div className="ls-board-page" key={`${page}-${board.length}`}>
         <div className="ls-board-title">{heading}</div>
@@ -569,7 +573,7 @@ function ReplyCard({ item, i }: { item: ReplyItem; i: number }) {
     <div className={`ls-reply-card ls-reply-${e.kind}${e.kind === 'superchat' ? ` ls-sc-${scTier(e.yuan)}` : ''}`} style={{ '--i': i } as React.CSSProperties}>
       <Avatar user={e.user} />
       <div className="ls-reply-body">
-        <div className="ls-reply-name"><Badge user={e.user} /><span className="ls-name">{e.user.name}</span>{e.kind === 'superchat' && <b className="ls-reply-price">¥{e.yuan}</b>}</div>
+        <div className="ls-reply-name"><Badge user={e.user} /><span className="ls-name">{viewerName(e.user.name)}</span>{e.kind === 'superchat' && <b className="ls-reply-price">¥{e.yuan}</b>}</div>
         {e.kind === 'chat' && e.sticker
           ? <img className="ls-sticker" src={e.sticker} referrerPolicy="no-referrer" alt={e.text} />
           : <p className={said ? undefined : 'ls-reply-act'}>{eventText(e)}</p>}
@@ -641,7 +645,7 @@ function AlertCard({ alert }: { alert: Alert }) {
         <div className={`ls-alert ls-sc ls-sc-${scTier(e.yuan)}${out}`} style={{ '--ls-ttl': `${ttl}ms` } as React.CSSProperties}>
           <div className="ls-sc-head">
             <Avatar user={e.user} />
-            <div className="ls-sc-who"><span>{e.user.name}</span><small>醒目留言</small></div>
+            <div className="ls-sc-who"><span>{viewerName(e.user.name)}</span><small>醒目留言</small></div>
             <b className="ls-sc-price">¥{e.yuan}</b>
           </div>
           <div className="ls-sc-text">{e.text}</div>
@@ -655,7 +659,7 @@ function AlertCard({ alert }: { alert: Alert }) {
         <div className={`ls-alert ls-gift ls-gift-${size}${size !== 'small' ? ' ls-big' : ''}${out}`}>
           {size === 'huge' && <i className="ls-rays" />}
           <Avatar user={e.user} />
-          <div className="ls-gift-text"><b>{e.user.name}</b><span>送出 <strong>{e.gift}</strong></span></div>
+          <div className="ls-gift-text"><b>{viewerName(e.user.name)}</b><span>送出 <strong>{e.gift}</strong></span></div>
           <span className="ls-gift-icon"><GiftIcon /></span>
           <em className="ls-combo" key={e.count}>×{e.count}</em>
           {size !== 'small' && giftArt && <ArtImg className="ls-alert-art" src={giftArt} />}
@@ -670,7 +674,7 @@ function AlertCard({ alert }: { alert: Alert }) {
           <span className="ls-guard-ship"><ShipIcon /></span>
           <div className="ls-guard-text">
             <small>欢迎上船</small>
-            <b>{e.user.name}</b>
+            <b>{viewerName(e.user.name)}</b>
             <span>开通了{e.level}{e.count > 1 ? ` ×${e.count}` : ''}</span>
           </div>
           <Avatar user={e.user} />
@@ -679,14 +683,14 @@ function AlertCard({ alert }: { alert: Alert }) {
         </div>
       );
     case 'follow':
-      return <div className={`ls-alert ls-follow${out}`}><span className="ls-follow-icon"><HeartIcon /></span><span><b>{e.user.name}</b> 关注了直播间</span></div>;
+      return <div className={`ls-alert ls-follow${out}`}><span className="ls-follow-icon"><HeartIcon /></span><span><b>{viewerName(e.user.name)}</b> 关注了直播间</span></div>;
     case 'enter':
       // 欢迎卡：从右边滑进来，她探出头挥挥手
       return (
         <div className={`ls-alert ls-enter${e.user.guard ? ` ls-enter-guard ls-enter-guard-${e.user.guard}` : ''}${waveArt ? ' ls-has-art' : ''}${out}`}>
           {waveArt && <ArtImg className="ls-enter-art" src={waveArt} />}
           {e.user.guard ? <Badge user={e.user} /> : null}
-          <span>欢迎 <b>{e.user.name}</b> 进入直播间</span>
+          <span>欢迎 <b>{viewerName(e.user.name)}</b> 进入直播间</span>
         </div>
       );
   }
@@ -725,27 +729,86 @@ export function AiLabel({ options }: { options?: Record<string, unknown> }) {
   return <div className="ls-ai-label"><i />{String(options?.text ?? 'AI 主播 · 内容由人工智能生成')}</div>;
 }
 
-// ── 吃饭计数 ─────────────────────────────────────────
+// ── 歌单 ─────────────────────────────────────────────
 
+function songTime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
 
-export function Rice({ options }: { options?: Record<string, unknown> }) {
-  const { tokens } = useStage();
-  const art = useArt('rice');
-  const { joules, perBowl, grains, grainsOf } = riceOf(tokens, options);
-  const bowls = Math.floor(grains / perBowl);
-  const prev = useRef(tokens);
-  const added = tokens - prev.current;
-  useEffect(() => { prev.current = tokens; }, [tokens]);
+/** 状态和进度来自舞台播放器的回执。 */
+export function Playlist() {
+  const { songs, connected } = useStage();
+  const playing = songs?.playing;
+  const playback = songs?.playback;
+  const list = useRef<HTMLOListElement>(null);
+  useEffect(() => { if (list.current) list.current.scrollTop = 0; }, [playing?.seq]);
+  if (!songs) return null;
+
+  const duration = playback?.durationMs || playing?.durationMs || 0;
+  const elapsed = Math.min(duration, Math.max(0, playback?.positionMs ?? 0));
+  const progress = duration > 0 && playback && playback.status !== 'resolving';
+  const active = connected && playback?.status === 'playing';
   return (
-    <div className="ls-rice">
-      {art && <ArtImg className="ls-rice-art" src={art} />}
-      <div className="ls-rice-body">
-        <div className="ls-rice-label">今天吃了</div>
-        <div className="ls-rice-count"><b key={grains}>{grains.toLocaleString()}</b><span>粒米</span>{added > 0 && <em key={tokens}>+{Math.max(1, grainsOf(added))}</em>}</div>
-        <div className="ls-rice-bowl" title={`第 ${bowls + 1} 碗`}><i style={{ width: `${((grains % perBowl) / perBowl) * 100}%` }} /><span>第 {bowls + 1} 碗</span></div>
-        <div className="ls-rice-note">{tokens.toLocaleString()} token ≈ {energy(joules)}电</div>
+    <section className={`ls-playlist ls-glass${active ? ' ls-playlist-active' : ''}`} aria-label="直播歌单" data-status={playback?.status}>
+      <header className="ls-playlist-head">
+        <h2><span aria-hidden="true">♫</span> 直播歌单</h2>
+        <span>{songs.waiting.length} 首待播</span>
+      </header>
+      <div className="ls-song-now">
+        <div className="ls-song-disc" aria-hidden="true"><span>♪</span></div>
+        <div className="ls-song-info">
+          <div className="ls-song-label">
+            {playing && active && <span className="ls-voice" aria-hidden="true"><b /><b /><b /><b /></span>}
+            {!connected ? '等待同步' : playing ? SONG_PLAYBACK_LABELS[playback?.status ?? 'loading'] : songs.enabled ? '等待点歌' : '点歌暂停'}
+          </div>
+          <strong className="ls-song-name" title={playing?.name}>{playing?.name ?? '下一首，听你喜欢的'}</strong>
+          <span className="ls-song-artist" title={playing?.artists.join('、')}>{playing ? playing.artists.join('、') || '未知歌手' : songs.enabled ? '发弹幕「点歌 歌名 歌手」' : '点歌暂未开放'}</span>
+        </div>
       </div>
-    </div>
+      {playing && (
+        <div className="ls-song-playback">
+          <div className="ls-song-meta"><span>{viewerName(playing.by)} 点的</span><span>{!connected ? '等待同步' : progress ? `${songTime(elapsed)} / ${songTime(duration)}` : '等待音频加载'}</span></div>
+          {progress ? <div className="ls-song-progress" role="progressbar" aria-label="播放进度" aria-valuemin={0} aria-valuemax={duration} aria-valuenow={elapsed}><i style={{ width: `${elapsed / duration * 100}%` }} /></div> : null}
+          {playback?.detail && <div className="ls-song-detail" role={playback.status === 'error' ? 'alert' : undefined}>{playback.detail}</div>}
+        </div>
+      )}
+      <div className="ls-playlist-next">接下来<span>按点歌顺序播放</span></div>
+      {songs.waiting.length ? (
+        <ol className="ls-playlist-list" ref={list}>
+          {songs.waiting.map((song, i) => (
+            <li key={song.seq}>
+              <span className="ls-song-order">{String(i + 1).padStart(2, '0')}</span>
+              <div className="ls-song-queued"><strong title={song.name}>{song.name}</strong><span title={song.artists.join('、')}>{song.artists.join('、') || '未知歌手'}</span></div>
+              <span className="ls-song-by">{viewerName(song.by)}</span>
+            </li>
+          ))}
+        </ol>
+      ) : <div className="ls-playlist-empty">{songs.enabled ? '还没有人排队，来点一首吧' : '暂时没有待播歌曲'}</div>}
+      <footer className="ls-playlist-foot">{songs.enabled ? '弹幕点歌 · 点歌 歌名 歌手' : '点歌暂未开放'}</footer>
+    </section>
+  );
+}
+
+// ── 今日收支（保留 rice 挂件名，兼容已有模板） ─────────
+
+const yuan = (value: number, digits = 2): string => value > 0 && value < 10 ** -digits ? `<¥${(10 ** -digits).toFixed(digits)}` : `¥${value.toFixed(digits)}`;
+
+export function Rice() {
+  const { finance, connected } = useStage();
+  const ready = connected && finance;
+  return (
+    <section className="ls-rice" aria-label="今日收支">
+      <div className="ls-rice-body">
+        <div className="ls-rice-label">今天用了</div>
+        <div className="ls-finance-cost">{ready ? yuan(finance.todayCostYuan, 4) : '等待同步'}</div>
+        <div className="ls-finance-row"><span>我的余额</span><b data-low={ready && finance.balanceYuan !== null && finance.balanceYuan < 1 ? '' : undefined}>{!ready ? '—' : finance.balanceYuan === null ? '未设置' : yuan(finance.balanceYuan)}</b></div>
+        <div className="ls-finance-row ls-finance-income"><span>今天要饭赚了</span><b>{ready ? yuan(finance.todayGiftYuan + finance.todayChatGiftYuan) : '—'}</b></div>
+        {ready && <div className="ls-finance-sources">礼物 {yuan(finance.todayGiftYuan)} · 弹幕 {yuan(finance.todayChatGiftYuan)}</div>}
+        <div className="ls-rice-note">{ready ? `${finance.todayTokens.toLocaleString()} token · 估算` : 'DeepSeek V4.1 Flash'}</div>
+        {ready && finance.unpricedTokens > 0 && <small className="ls-finance-unpriced">另有用量未计价</small>}
+      </div>
+    </section>
   );
 }
 
@@ -880,7 +943,7 @@ function Ending() {
         {names.length ? (
           <div className="ls-end-thanks">
             <span>特别感谢</span>
-            <div className="ls-end-names">{names.map((s, i) => <em key={s.name} style={{ '--i': i } as React.CSSProperties}>{s.name}</em>)}</div>
+            <div className="ls-end-names">{names.map((s, i) => <em key={s.name} style={{ '--i': i } as React.CSSProperties}>{viewerName(s.name)}</em>)}</div>
           </div>
         ) : null}
       </div>

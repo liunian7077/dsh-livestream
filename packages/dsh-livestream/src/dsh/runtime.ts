@@ -23,10 +23,13 @@ import { Broadcast } from '../body/broadcast';
 import { DmManager } from '../body/dm';
 import { Packs } from '../body/packs';
 import { StageServer } from '../body/server';
+import { Songbook, type QueuedSong } from '../body/songbook';
+import { Finance } from '../body/finance';
+import { findSong, resolveSong } from '../body/netease';
 import { canSpeak, subtitleTimeline, synthesize, type TtsAuth } from '../body/tts';
 import { DEFAULT_VOICE } from '../body/voices';
 import type { DistillLlm } from '../core/memory/distill';
-import type { CharacterManifest, GameSource } from '../stage/protocol';
+import type { CharacterManifest, GameSource, GiftPrice, StageSong } from '../stage/protocol';
 import type { LivePlatform } from '../core/live';
 import { gameRect } from '../stage/layout';
 import { connectObs, showGameSources } from '../body/obs';
@@ -70,6 +73,16 @@ export interface Settings {
   boardText: string;
   /** 滚动通知：画面最底下一条滚动的字，出状况时告诉观众（卡了、在修、马上回来）；空串不显示 */
   noticeText: string;
+  /** 点歌：观众发「点歌 歌名 歌手」，插件去网易云搜、排队，由舞台播放 */
+  songRequest: boolean;
+  /** 点歌队列最多排几首（不含正在放的那首） */
+  songQueueMax: number;
+  /** 一个人同时最多排几首（含正在放的） */
+  songPerUserMax: number;
+  /** 启用记账前的 API 余额；null 尚未设置。余额只扣模型费用。 */
+  initialBalanceYuan: number | null;
+  /** 真正的礼物消息与弹幕文本分别配置单价。 */
+  giftPrices: GiftPrice[];
   /** 主人定的节奏（秒）：没填的项按直播间热度自动；欢迎填 off 就不欢迎新观众 */
   pace: Pace;
 }
@@ -115,6 +128,7 @@ export const SECRETS = {
   cookie: 'BILIBILI_COOKIE',
   /** 抖音的登录 Cookie：没有它抖音只推弹幕/进场/点赞，不推礼物 */
   douyinCookie: 'DOUYIN_COOKIE',
+  neteaseCookie: 'NETEASE_COOKIE',
   ttsApiKey: 'DOUBAO_TTS_API_KEY',
   ttsAppId: 'DOUBAO_TTS_APP_ID',
   ttsAccessKey: 'DOUBAO_TTS_ACCESS_KEY',
@@ -166,9 +180,20 @@ function loadSettings(): Settings {
     asrModel: 'large-v3-turbo',
     boardText: DEFAULT_BOARD,
     noticeText: '',
+    songRequest: true,
+    songQueueMax: 20,
+    songPerUserMax: 2,
+    initialBalanceYuan: null,
+    giftPrices: [],
     pace: {},
     ...saved,
   };
+  // 存档里的值可能来自旧版本或被手改过：夹一下范围
+  settings.songRequest = settings.songRequest !== false;
+  settings.songQueueMax = Math.max(1, Math.min(100, Math.round(Number(settings.songQueueMax) || 20)));
+  settings.songPerUserMax = Math.max(1, Math.min(5, Math.round(Number(settings.songPerUserMax) || 2)));
+  settings.initialBalanceYuan = settings.initialBalanceYuan !== null && Number.isFinite(Number(settings.initialBalanceYuan)) && Number(settings.initialBalanceYuan) >= 0 ? Number(settings.initialBalanceYuan) : null;
+  settings.giftPrices = Array.isArray(settings.giftPrices) ? settings.giftPrices.filter((r) => r && (r.source === 'gift' || r.source === 'chat') && typeof r.name === 'string' && r.name.trim() && Number.isFinite(r.yuan) && r.yuan >= 0).map((r) => ({ source: r.source, name: r.name.trim(), yuan: r.yuan })) : [];
   if (!settings.stageToken) {
     settings.stageToken = randomBytes(12).toString('base64url');
     saveSettings(settings);
@@ -182,6 +207,7 @@ function saveSettings(next: Settings): void {
 }
 
 export const settings: Settings = loadSettings();
+export const finance = new Finance(join(dataDir, 'finance.json'), () => settings, () => publishFinance());
 
 export function updateSettings(patch: Partial<Settings>): Settings {
   Object.assign(settings, patch);
@@ -212,6 +238,19 @@ async function ttsAuth(voice: string): Promise<TtsAuth | null> {
 }
 
 export const packs = new Packs(packageDir(), dataDir);
+
+/**
+ * 点歌队列：搜歌、获取音频地址，舞台通过浏览器音频播放并回传状态。
+ * 控制台关掉点歌时 show 拿到的就是 null，弹幕里的「点歌」不再处理。
+ */
+export const songbook = new Songbook({
+  find: async (query) => findSong(query, await hooks.secret(SECRETS.neteaseCookie)),
+  resolve: async (song) => resolveSong(song, await hooks.secret(SECRETS.neteaseCookie)),
+  log: (level, message) => hooks.log(level, message),
+  maxQueue: () => settings.songQueueMax,
+  maxPerUser: () => settings.songPerUserMax,
+  onChange: () => publishSongs(),
+});
 
 export function currentCharacter(): CharacterManifest | null {
   return packs.character(settings.character);
@@ -249,8 +288,17 @@ export const show = new LiveShow(
     log: (level, message) => hooks.log(level, message),
     persist: (snapshot) => saveLive(snapshot),
     onGame: (source) => placeGame(source),
+    onLive: (event) => finance.recordLive(event, show.status().roomId),
   },
-  { dataDir, names: currentCharacter()?.names ?? [], idleAfterMs: () => settings.idleAfterSec * 1000, pace: () => ownerPace(settings.pace), board: () => settings.boardText, gameChatGapMs: () => (settings.gameChatGapSec ?? 15) * 1000 },
+  {
+    dataDir,
+    names: currentCharacter()?.names ?? [],
+    idleAfterMs: () => settings.idleAfterSec * 1000,
+    pace: () => ownerPace(settings.pace),
+    board: () => settings.boardText,
+    gameChatGapMs: () => (settings.gameChatGapSec ?? 15) * 1000,
+    songs: () => (settings.songRequest ? songbook : null),
+  },
 );
 
 /**
@@ -286,6 +334,32 @@ export function publishNotice(): void {
 }
 publishNotice();
 
+export function publishFinance(): void {
+  show.stage.broadcast({ type: 'finance', finance: finance.snapshot() });
+}
+publishFinance();
+
+export function songView(entry: QueuedSong): StageSong {
+  return {
+    seq: entry.seq,
+    ...entry.song,
+    by: entry.by.name,
+    requestedAt: entry.requestedAt,
+    ...(entry.startedAt !== undefined ? { startedAt: entry.startedAt } : {}),
+  };
+}
+
+/** 队列和开关变化立即同步；Stage 会保留最新状态供重连时补发 */
+export function publishSongs(): void {
+  show.stage.broadcast({ type: 'songs', songs: {
+    enabled: settings.songRequest,
+    playing: songbook.playing ? songView(songbook.playing) : null,
+    waiting: songbook.waiting.map(songView),
+    playback: songbook.playback,
+  } });
+}
+publishSongs();
+
 async function speech(text: string, signal: AbortSignal, voice = currentVoice()): Promise<{ audio: Uint8Array; timeline: Array<{ chars: number; atMs: number }> } | null> {
   const auth = await ttsAuth(voice);
   if (!auth) return null;
@@ -315,6 +389,7 @@ export const server = new StageServer({
     source: (id) => show.player.source(id),
     report: (id, state, positionSec, detail) => show.player.report(id, state, positionSec, detail),
   },
+  music: songbook,
   log: (level, message) => hooks.log(level, message),
 });
 
@@ -331,6 +406,7 @@ export async function cookieFor(platform: LivePlatform): Promise<string> {
 export const broadcast = new Broadcast({
   cookie,
   stageUrl: () => server.url,
+  canvas: () => packs.template(settings.template)?.canvas ?? [1920, 1080],
   areaId: () => settings.areaId,
   title: () => settings.liveTitle.trim() || null,
   protocol: () => settings.pushProtocol,
@@ -395,10 +471,15 @@ export const social = new SocialManager(new BiliSocial(cookie));
 
 /** 直播时每隔一会儿看一眼收件箱：开播以后新来的私信、回复、@，没别的事时告诉她 */
 const INBOX_EVERY_MS = 90_000;
-setInterval(() => {
-  if (!show.isOnAir) return;
-  void social.newSince().then((lines) => { if (lines.length) show.notifyInbox(lines); }).catch(() => {});
-}, INBOX_EVERY_MS).unref?.();
+export function watchInbox(): () => void {
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (!show.isOnAir) return;
+    void social.newSince().then((lines) => { if (!stopped && lines.length) show.notifyInbox(lines); }).catch(() => {});
+  }, INBOX_EVERY_MS);
+  timer.unref?.();
+  return () => { stopped = true; clearInterval(timer); };
+}
 
 /** 她搜视频、看视频、在舞台上放视频（开播账号的 Cookie：AI 字幕要登录才给） */
 export const videos = new BiliVideos(cookie);

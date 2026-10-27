@@ -8,6 +8,9 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import QRCode from 'qrcode';
 import type { LivePlatform } from '../core/live';
+import type { GiftPrice, StageFinance, StageSong, StageSongs } from '../stage/protocol';
+import { SONG_PLAYBACK_LABELS } from '../stage/protocol';
+import { viewerName } from '../core/viewerName';
 
 // ── DSH 服务 ──────────────────────────────────────────
 
@@ -61,9 +64,9 @@ function useServices(): ConsoleServices | null {
 const PRESET_ID = 'dsh-livestream';
 /** 游戏线（另一个会话里的她，专门玩游戏）用的预设 */
 const GAME_PRESET_ID = 'dsh-livestream-game';
-const SECRET_REFS = { cookie: 'BILIBILI_COOKIE', tts: 'DOUBAO_TTS_API_KEY' } as const;
+const SECRET_REFS = { cookie: 'BILIBILI_COOKIE', tts: 'DOUBAO_TTS_API_KEY', music: 'NETEASE_COOKIE' } as const;
 
-interface PackEntry { id: string; name: string; builtin: boolean }
+interface PackEntry { id: string; name: string; builtin: boolean; canvas?: [number, number] }
 interface SpokenLine { text: string; mood: string; at: number }
 interface ShowStatus {
   live: { state: string; room?: { title?: string; anchorName?: string; realRoomId?: number }; loggedIn: boolean; stats: { online?: number; live?: boolean }; perMinute: Record<string, number>; lastError?: string };
@@ -86,15 +89,23 @@ interface BroadcastStatus {
   health: { active: boolean; timecode: string; skipped: number; total: number; renderSkipped: number; outputSkipped: number; kbps: number } | null;
   startedAt: number | null;
 }
+/** 点歌队列里的一首 */
+type SongRow = StageSong;
 interface HostState {
   ok: boolean;
   show: ShowStatus;
   broadcast: BroadcastStatus;
-  settings: { platform: LivePlatform; roomId: number | null; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
+  settings: { platform: LivePlatform; roomId: number | null; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; songRequest?: boolean; songQueueMax?: number; songPerUserMax?: number; initialBalanceYuan: number | null; giftPrices: GiftPrice[]; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
+  finance: StageFinance;
   stageUrl: string;
   characters: PackEntry[];
   templates: PackEntry[];
   asr: { available: boolean };
+  songs: StageSongs & {
+    recent: SongRow[];
+    max: number;
+    perUser: number;
+  };
   defaultBoard: string;
 }
 
@@ -117,9 +128,11 @@ interface Live {
   feed: FeedRow[];
   focus: Set<string>;
   brainDetail: string;
+  songs: StageSongs | null;
+  finance: StageFinance | null;
 }
 
-let live: Live = { status: null, broadcast: null, feed: [], focus: new Set(), brainDetail: '' };
+let live: Live = { status: null, broadcast: null, feed: [], focus: new Set(), brainDetail: '', songs: null, finance: null };
 const liveListeners = new Set<() => void>();
 let source: EventSource | null = null;
 let feedSeq = 0;
@@ -155,6 +168,10 @@ function connectFeed(): void {
       setLive((l) => ({ ...l, focus: new Set(e.userIds) }));
     } else if (e.type === 'brain') {
       setLive((l) => ({ ...l, brainDetail: e.detail ?? '' }));
+    } else if (e.type === 'songs') {
+      setLive((l) => ({ ...l, songs: e.songs }));
+    } else if (e.type === 'finance') {
+      setLive((l) => ({ ...l, finance: e.finance }));
     }
   };
 }
@@ -231,11 +248,11 @@ function bumpSecrets(): void {
 function useSecrets(): Record<string, boolean | null> {
   const creds = useCredentials();
   const version = useSyncExternalStore((l) => { secretListeners.add(l); return () => secretListeners.delete(l); }, () => secretVersion);
-  const [state, setState] = useState<Record<string, boolean | null>>({ cookie: null, tts: null });
+  const [state, setState] = useState<Record<string, boolean | null>>({ cookie: null, tts: null, music: null });
   useEffect(() => {
     if (!creds) return;
-    const refs = [SECRET_REFS.cookie, SECRET_REFS.tts];
-    void creds.describe(refs).then((r) => setState({ cookie: !!r.value?.[SECRET_REFS.cookie]?.configured, tts: !!r.value?.[SECRET_REFS.tts]?.configured })).catch(() => {});
+    const refs = [SECRET_REFS.cookie, SECRET_REFS.tts, SECRET_REFS.music];
+    void creds.describe(refs).then((r) => setState({ cookie: !!r.value?.[SECRET_REFS.cookie]?.configured, tts: !!r.value?.[SECRET_REFS.tts]?.configured, music: !!r.value?.[SECRET_REFS.music]?.configured })).catch(() => {});
   }, [creds, version]);
   return state;
 }
@@ -279,7 +296,7 @@ function Img({ src, className, fallback = null }: { src: string; className: stri
 
 export function Console() {
   const svc = useServices();
-  const { status, feed, focus, brainDetail, broadcast: liveBc } = useLive();
+  const { status, feed, focus, brainDetail, broadcast: liveBc, songs: liveSongs, finance: liveFinance } = useLive();
   const [host, setHost] = useState<HostState | null>(null);
   const [busy, error, run] = useBusy();
   const [room, setRoom] = useState('');
@@ -330,6 +347,8 @@ export function Console() {
   };
 
   const bc = liveBc ?? host?.broadcast ?? null;
+  const canvas = host?.templates.find((t) => t.id === settings?.template)?.canvas ?? [1920, 1080];
+  const portrait = canvas[1] > canvas[0];
   const conn = show?.live.state ?? 'idle';
   const connTone = conn === 'connected' ? 'ok' : conn === 'error' ? 'bad' : conn === 'idle' ? 'idle' : 'warn';
   const previewUrl = host ? `${host.stageUrl}&preview=1${demo ? `&demo=${demo}` : ''}` : '';
@@ -395,7 +414,7 @@ export function Console() {
         <div className="dl-grid">
           <main className="dl-main">
             <section className="dl-monitor">
-              <div className="dl-preview" ref={previewRef}>
+              <div className={`dl-preview${portrait ? ' dl-preview-portrait' : ''}`} style={{ aspectRatio: `${canvas[0]} / ${canvas[1]}` }} ref={previewRef}>
                 {previewUrl && <iframe src={previewUrl} title="舞台预览" />}
                 <button className="dl-fullscreen" title="全屏看舞台（Esc 退出）" onClick={() => void previewRef.current?.requestFullscreen?.()}><FullscreenGlyph /><span>全屏</span></button>
                 <span className={`dl-preview-tag${show?.onAir ? ' dl-preview-live' : ''}`}><i />{show?.onAir ? '直播中 · 和 OBS 里一样（静音）' : '预览：开播后的样子 · OBS 里现在是「马上开始」的等待画面'}</span>
@@ -405,16 +424,16 @@ export function Console() {
                   <span className="dl-label">OBS 浏览器源</span>
                   <code onClick={copyUrl} title="点一下复制">{host?.stageUrl ?? ''}</code>
                   <button className={copied ? 'dl-done' : ''} onClick={copyUrl}>{copied ? '已复制' : '复制'}</button>
-                  <span className="dl-meta">1920 × 1080</span>
+                  <span className="dl-meta">{portrait ? '竖屏' : '横屏'} · {canvas[0]} × {canvas[1]}</span>
                 </div>
               </div>
               <div className="dl-skins">
                 <span className="dl-label">主题</span>
                 <div className="dl-skin-list">
                   {host && [...host.templates].sort((a, b) => Number(b.id === 'default') - Number(a.id === 'default')).map((t) => (
-                    <button key={t.id} className={`dl-skin${t.id === settings?.template ? ' dl-on' : ''}`} onClick={() => chooseTheme(t.id)}>
+                    <button key={t.id} className={`dl-skin${t.canvas && t.canvas[1] > t.canvas[0] ? ' dl-skin-portrait' : ''}${t.id === settings?.template ? ' dl-on' : ''}`} onClick={() => chooseTheme(t.id)}>
                       <Img className="dl-skin-img" src={stageFile(host.stageUrl, 'templates', t.id, 'preview.jpg')} fallback={<span className="dl-skin-img dl-skin-blank" />} />
-                      <b>{t.name}</b>{t.builtin ? null : <small>自定义</small>}
+                      <b>{t.name}</b><small>{t.canvas && t.canvas[1] > t.canvas[0] ? '竖屏' : '横屏'}{t.canvas ? ` · ${t.canvas[0]} × ${t.canvas[1]}` : ''}{t.builtin ? '' : ' · 自定义'}</small>
                     </button>
                   ))}
                 </div>
@@ -513,10 +532,12 @@ export function Console() {
                 <input defaultValue={settings?.streamKbps ?? 4500} inputMode="numeric" title="码率 kbps" onBlur={(e) => choose({ streamKbps: Number(e.target.value.replace(/\D/g, '')) || 4500 })} />
                 <span className="dl-meta">kbps</span>
               </div>
-              <p className="dl-hint">开播时：没有直播间会自动开通；B 站要人脸认证时这里弹出二维码，用 B 站 App 扫一下；推流码自动填进 OBS（专用配置「dsh-livestream」，1080p30、NVENC、CBR，RTMP 网络堵时自动降码率），不用手动配 OBS。推流时上面会显示码率和丢帧，丢帧多就换 SRT 或调低码率。</p>
+              <p className="dl-hint">开播时：没有直播间会自动开通；B 站要人脸认证时这里弹出二维码，用 B 站 App 扫一下；推流码自动填进 OBS（专用配置「dsh-livestream」，{canvas[0]} × {canvas[1]}、30 帧、NVENC、CBR，RTMP 网络堵时自动降码率），不用手动配 OBS。横竖屏在开播前选择，推流时上面会显示码率和丢帧。</p>
             </div>
             <h3>告示板</h3>
             <BoardField value={settings?.boardText ?? ''} fallback={host?.defaultBoard ?? ''} onSave={(boardText) => choose({ boardText })} />
+            <h3>余额与礼物收入</h3>
+            {settings && <FinanceFields initial={settings.initialBalanceYuan ?? null} prices={settings.giftPrices} finance={liveFinance ?? host?.finance} busy={busy} onSave={choose} />}
             <h3>滚动通知</h3>
             <div className="dl-field">
               <div className="dl-row">
@@ -525,6 +546,28 @@ export function Console() {
               </div>
               <p className="dl-hint">写了就在画面最底下滚动，告诉观众现在出了什么状况；回车生效，「收起」就不显示了。</p>
             </div>
+            <h3>点歌</h3>
+            <div className="dl-field">
+              <label className="dl-check">
+                <input type="checkbox" checked={settings?.songRequest !== false} onChange={(e) => choose({ songRequest: e.target.checked })} />
+                开着点歌：观众发「点歌 歌名 歌手」，插件去网易云搜，由 OBS 舞台播放
+              </label>
+              <div className="dl-row">
+                <input defaultValue={settings?.songQueueMax ?? 20} inputMode="numeric" title="队列上限" onBlur={(e) => choose({ songQueueMax: Number(e.target.value.replace(/\D/g, '')) || 20 })} />
+                <span className="dl-meta">首：队列最多排这么多</span>
+              </div>
+              <div className="dl-row">
+                <input defaultValue={settings?.songPerUserMax ?? 2} inputMode="numeric" title="每人上限" onBlur={(e) => choose({ songPerUserMax: Number(e.target.value.replace(/\D/g, '')) || 2 })} />
+                <span className="dl-meta">首：一个人同时最多排这么多</span>
+              </div>
+              <SongQueue
+                songs={host?.songs && liveSongs ? { ...host.songs, ...liveSongs } : host?.songs}
+                onNext={() => run(async () => setHost(await api('songs/next', {})))}
+                onClear={() => run(async () => setHost(await api('songs/clear', {})))}
+              />
+              <p className="dl-hint">写法：「点歌 晴天」「点歌 晴天 周杰伦」「点歌 晴天--周杰伦」。歌曲播放结束后自动换下一首，也可以手动跳过。请保持 OBS 舞台浏览器源开启；控制台预览保持静音。仅支持当前账号有权播放的完整音源。</p>
+            </div>
+            <SecretField label="网易云 Cookie（可选）" ref_={SECRET_REFS.music} configured={secrets.music} hint="登录网易云网页版后复制 Cookie；未配置时使用公开音源" />
             <h3>节奏</h3>
             <div className="dl-field">
               <div className="dl-row">
@@ -563,7 +606,7 @@ export function Console() {
             <SecretField label="B 站 Cookie（不想扫码时手填）" ref_={SECRET_REFS.cookie} configured={secrets.cookie} hint="浏览器里登录 B 站后复制的 Cookie；扫码登录会自动填这一项" />
             <h3>舞台</h3>
             <div className="dl-field">
-              <label>OBS 舞台地址（来源 → 浏览器 → 粘贴，宽 1920 高 1080）</label>
+              <label>OBS 舞台地址（来源 → 浏览器 → 粘贴，宽 {canvas[0]} 高 {canvas[1]}）</label>
               <div className="dl-row">
                 <input readOnly value={host?.stageUrl ?? ''} onFocus={(e) => e.currentTarget.select()} />
                 <button className={copied ? 'dl-done' : ''} onClick={copyUrl}>{copied ? '已复制' : '复制'}</button>
@@ -649,6 +692,67 @@ function LoginField() {
       {qr && <img src={qr.img} alt="B 站登录二维码" style={{ width: 200, height: 200, borderRadius: 12, marginTop: 8, background: '#fff' }} />}
       {status && <p className="dl-hint">{status}</p>}
     </div>
+  );
+}
+
+/** 点歌队列：正在放的、排着的、刚放完的，以及「下一首」「清空」 */
+function SongQueue({ songs, onNext, onClear }: { songs?: HostState['songs']; onNext: () => void; onClear: () => void }) {
+  if (!songs) return null;
+  const line = (row: SongRow) => `${row.name}${row.artists.length ? ` — ${row.artists.join('、')}` : ''}`;
+  return (
+    <div className="dl-songs">
+      <div className="dl-row">
+        <button disabled={!songs.playing && !songs.waiting.length} onClick={onNext}>下一首</button>
+        <button disabled={!songs.waiting.length} onClick={onClear}>清空排队</button>
+        <span className="dl-meta">{songs.waiting.length} / {songs.max} 首在排队</span>
+      </div>
+      {!songs.enabled && <p className="dl-hint">点歌现在是关的，观众发「点歌」不会处理。</p>}
+      {songs.playing ? (
+        <p className="dl-song-now">{SONG_PLAYBACK_LABELS[songs.playback?.status ?? 'loading']}：{line(songs.playing)}<span className="dl-meta"> · {viewerName(songs.playing.by)} 点的</span></p>
+      ) : (
+        <p className="dl-meta">队列空着。</p>
+      )}
+      {songs.playback?.detail && <p className={songs.playback.status === 'error' ? 'dl-error' : 'dl-hint'}>{songs.playback.detail}</p>}
+      {songs.waiting.length > 0 && (
+        <ol className="dl-song-list">
+          {songs.waiting.map((row) => <li key={row.seq}>{line(row)}<span className="dl-meta"> · {viewerName(row.by)}</span></li>)}
+        </ol>
+      )}
+      {songs.recent.length > 0 && (
+        <p className="dl-meta">刚放完：{songs.recent.map((row) => row.name).join('、')}</p>
+      )}
+    </div>
+  );
+}
+
+function FinanceFields({ initial, prices = [], finance, busy, onSave }: { initial: number | null; prices: GiftPrice[]; finance?: StageFinance; busy: boolean; onSave: (patch: Record<string, unknown>) => void }) {
+  const [balance, setBalance] = useState(initial === null ? '' : String(initial));
+  const [rules, setRules] = useState(() => prices.map((r) => ({ ...r, yuan: String(r.yuan) })));
+  const savedPrices = JSON.stringify(prices);
+  useEffect(() => { setBalance(initial === null ? '' : String(initial)); }, [initial]);
+  useEffect(() => { setRules(prices.map((r) => ({ ...r, yuan: String(r.yuan) }))); }, [savedPrices]);
+  const edit = (index: number, patch: Partial<(typeof rules)[number]>) => setRules((rows) => rows.map((r, i) => i === index ? { ...r, ...patch } : r));
+  return (
+    <form className="dl-field dl-finance" onSubmit={(e) => {
+      e.preventDefault();
+      onSave({ initialBalanceYuan: balance === '' ? null : Number(balance), giftPrices: rules.map((r) => ({ ...r, yuan: Number(r.yuan) })) });
+    }}>
+      {finance && <div className="dl-finance-overview"><span>今日模型费 <b>¥{finance.todayCostYuan.toFixed(4)}</b></span><span>估算余额 <b>{finance.balanceYuan === null ? '未设置' : `¥${finance.balanceYuan.toFixed(4)}`}</b></span><span>礼物消息 <b>¥{finance.todayGiftYuan.toFixed(2)}</b></span><span>弹幕规则 <b>¥{finance.todayChatGiftYuan.toFixed(2)}</b></span></div>}
+      <label htmlFor="dl-initial-balance">初始 API 余额（元）</label>
+      <input id="dl-initial-balance" type="number" min="0" max="1000000000" step="any" value={balance} placeholder="例如 100；留空不显示余额" onChange={(e) => setBalance(e.target.value)} />
+      <p className="dl-hint">余额 = 初始金额 − 累计模型费；统计和余额重启后保留。礼物收入单列，不充入 API 余额；配音费用不从此处扣减。</p>
+      <p className="dl-hint">DeepSeek V4.1 Flash 每百万 token：高峰缓存输入 ¥0.04、未缓存输入 ¥2、输出 ¥8；空闲半价。北京时间工作日 9–12、14–18 点为高峰，周末与节假日为空闲。<a href="https://api-docs.deepseek.com/zh-cn/quick_start/pricing/" target="_blank" rel="noreferrer">官方定价</a></p>
+      {finance && finance.unpricedTokens > 0 && <p className="dl-hint">另有 {finance.unpricedTokens.toLocaleString()} token 来自未支持计价的模型，未扣入余额。</p>}
+      <label>礼物名称 / 弹幕文本与单价</label>
+      {rules.map((r, i) => <div className="dl-gift-price" key={i}>
+        <select aria-label={`规则 ${i + 1} 来源`} value={r.source} onChange={(e) => edit(i, { source: e.target.value as GiftPrice['source'] })}><option value="gift">礼物消息</option><option value="chat">弹幕文本</option></select>
+        <input aria-label={`规则 ${i + 1} 名称`} required maxLength={100} value={r.name} placeholder={r.source === 'gift' ? '平台礼物名称' : '完整弹幕文本'} onChange={(e) => edit(i, { name: e.target.value })} />
+        <input aria-label={`规则 ${i + 1} 单价（元）`} type="number" required min="0" max="1000000" step="any" value={r.yuan} onChange={(e) => edit(i, { yuan: e.target.value })} />
+        <button type="button" aria-label={`删除规则 ${i + 1}`} onClick={() => setRules((rows) => rows.filter((_, j) => i !== j))}>删除</button>
+      </div>)}
+      <div className="dl-row"><button type="button" disabled={rules.length >= 100} onClick={() => setRules((rows) => [...rows, { source: 'gift', name: '', yuan: '0' }])}>＋ 添加价格</button><button type="submit" disabled={busy}>保存收支设置</button></div>
+      <p className="dl-hint">礼物消息：单价 × 数量，未配置时使用平台金额，免费礼物计 ¥0；醒目留言、上舰使用平台金额。弹幕文本：完整匹配才按每条计一次，普通弹幕不计收入。同名不同来源互不混算，连击只加新增数量，模拟消息不入账。价格修改只影响新事件；这里是估算收入。</p>
+    </form>
   );
 }
 
@@ -793,7 +897,7 @@ function Feed({ feed, focus, sleep }: { feed: FeedRow[]; focus: Set<string>; sle
               ? <span className="dl-feed-avatar dl-her-avatar">鲸</span>
               : <span className="dl-feed-avatar" style={{ '--h': hue(r.name) } as React.CSSProperties}>{[...r.name][0] ?? '?'}</span>}
             <div className="dl-feed-main">
-              <span className="dl-feed-name">{r.kind === 'her' ? '她' : r.name}{focused && <em>她在回</em>}{r.yuan ? <b>¥{r.yuan}</b> : null}</span>
+              <span className="dl-feed-name">{r.kind === 'her' ? '她' : viewerName(r.name)}{focused && <em>她在回</em>}{r.yuan ? <b>¥{r.yuan}</b> : null}</span>
               <span className="dl-feed-text">{r.text}</span>
             </div>
           </div>
@@ -904,6 +1008,9 @@ export const CONSOLE_CSS = `
 .dl-room button:hover:not(:disabled){background:var(--dl-hover);border-color:rgba(92,182,255,.4)}
 .dl-room button:active:not(:disabled){transform:translateY(1px) scale(.98)}
 .dl-room button.dl-pick-on{border-color:rgba(63,163,255,.65);background:rgba(63,163,255,.16);color:var(--dl-text);font-weight:650}
+.dl-songs{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.dl-song-now{font-size:13px;color:var(--dl-text);margin:0}
+.dl-song-list{margin:0;padding-left:20px;font-size:12.5px;color:var(--dl-dim);line-height:1.8}
 .dl-room button:disabled{opacity:.4;cursor:default}
 .dl-room button.dl-done{color:light-dark(#1f9e68,#5fe0a8);border-color:rgba(95,224,168,.5)}
 .dl-room button.dl-send{min-width:64px;color:#fff;font-weight:700;background:var(--dl-blue);border-color:transparent}
@@ -935,12 +1042,13 @@ export const CONSOLE_CSS = `
 .dl-monitor{border-radius:20px;background:var(--dl-surface);border:1px solid var(--dl-line);box-shadow:var(--dl-shadow);overflow:hidden}
 .dl-preview{position:relative;aspect-ratio:16/9;background:#05070c}
 .dl-preview iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.dl-preview-portrait{width:min(100%,calc(76vh * 9 / 16));margin-inline:auto}
 .dl-preview:fullscreen{aspect-ratio:auto;width:100vw;height:100vh;background:#000}
 .dl-room .dl-fullscreen{position:absolute;right:12px;top:12px;display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;
   color:#fff;background:rgba(10,14,24,.6);border-color:rgba(255,255,255,.18);backdrop-filter:blur(6px);opacity:.75}
 .dl-room .dl-fullscreen:hover:not(:disabled){opacity:1;background:rgba(10,14,24,.8)}
 .dl-preview:fullscreen .dl-fullscreen,.dl-preview:fullscreen .dl-preview-tag{display:none}
-.dl-preview-tag{position:absolute;left:12px;top:12px;display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;color:#fff;background:rgba(10,14,24,.6);backdrop-filter:blur(6px);pointer-events:none}
+.dl-preview-tag{position:absolute;left:12px;top:12px;max-width:calc(100% - 44px);display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;color:#fff;background:rgba(10,14,24,.6);backdrop-filter:blur(6px);pointer-events:none}
 .dl-preview-tag i{width:6px;height:6px;border-radius:50%;background:var(--dl-faint)}
 .dl-preview-live i{background:#ff4d6d;animation:dl-rec 1.6s ease-out infinite}
 .dl-monitor-bar{padding:12px 16px;border-top:1px solid var(--dl-line)}
@@ -950,6 +1058,7 @@ export const CONSOLE_CSS = `
 .dl-skin-list{display:flex;flex-wrap:wrap;gap:10px}
 .dl-room button.dl-skin{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:6px 6px 8px;border-radius:14px;background:var(--dl-sunken)}
 .dl-skin-img{display:block;width:150px;aspect-ratio:16/9;border-radius:9px;object-fit:cover}
+.dl-skin-portrait .dl-skin-img{object-fit:contain;background:var(--dl-surface-2)}
 .dl-skin-blank{background:linear-gradient(135deg,#2a3350,#3a2f4f)}
 .dl-skin b{font-size:12px;font-weight:600;padding:0 4px}
 .dl-skin small{font-size:10px;color:var(--dl-faint);padding:0 4px;margin-top:-4px}
@@ -1018,6 +1127,11 @@ export const CONSOLE_CSS = `
 .dl-drawer h3{margin:22px 0 4px;font-size:12px;font-weight:600;color:var(--dl-faint);letter-spacing:1px}
 .dl-field{display:flex;flex-direction:column;gap:7px;margin-top:10px;min-width:0}
 .dl-field label{font-size:12px;color:var(--dl-dim);display:flex;align-items:center;gap:8px}
+.dl-finance-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:10px;border:1px solid var(--dl-line);border-radius:10px;font-size:12px;color:var(--dl-dim)}
+.dl-finance-overview b{display:block;margin-top:4px;font-variant-numeric:tabular-nums;color:var(--dl-text)}
+.dl-gift-price{display:grid;grid-template-columns:100px minmax(0,1fr) 78px auto;gap:5px}
+.dl-gift-price input,.dl-gift-price select{min-width:0;width:100%;padding-inline:6px}
+.dl-gift-price button{padding-inline:6px}
 .dl-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dl-dim);margin:8px 0 2px}
 .dl-check input{flex:none}
 .dl-tag{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--dl-line);color:var(--dl-faint)}

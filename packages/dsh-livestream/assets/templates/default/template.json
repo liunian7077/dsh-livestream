@@ -30,17 +30,27 @@
       "x": 40,
       "y": 112,
       "w": 420,
-      "h": 370
+      "h": 220,
+      "options": {
+        "compact": true
+      }
     },
     {
       "type": "chat",
       "x": 40,
-      "y": 498,
+      "y": 348,
       "w": 420,
-      "h": 544,
+      "h": 288,
       "options": {
-        "rows": 6
+        "rows": 4
       }
+    },
+    {
+      "type": "playlist",
+      "x": 40,
+      "y": 652,
+      "w": 420,
+      "h": 390
     },
     {
       "type": "character",

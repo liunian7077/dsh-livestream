@@ -42,6 +42,9 @@
 **记得人**
 这一场和以前来过的观众、他们说过的话，她都记得；常来的人会被认出来。
 
+**点歌**
+观众发「点歌 晴天 周杰伦」（歌名和歌手用空格或 `--` 隔开都行），插件去网易云搜、排队、获取音源，由 OBS 舞台浏览器源直接播放。歌单显示实际播放状态和进度，播完自动切下一首；搜不到或音源无权限会明确提示。无需安装网易云客户端。可在控制台保存网易云 Cookie，使用账号有权播放的完整音源。
+
 </td>
 </tr>
 </table>
@@ -63,6 +66,8 @@
 
 在 DSH 侧边栏打开「直播」：看舞台预览、换皮肤、开播下播、跟她说话、模拟观众（不开播也能彩排）。
 
+开播前在皮肤中选择「海边小屋 · 竖屏」，使用 1080 × 1920（9:16）舞台，人物、字幕、弹幕和歌单都按竖屏排版。开播时会自动设置 OBS 画布、输出和浏览器源尺寸；手动添加浏览器源时也请使用这个尺寸。切回横屏皮肤即可恢复 1920 × 1080，横竖屏切换需要先停止推流。
+
 ## 需要
 
 - DeepSeek Harness（网页版）
@@ -77,16 +82,27 @@ pnpm install
 pnpm -C packages/dsh-livestream dev
 ```
 
-`dev` 会盯着源码、改哪建哪；把 `packages/dsh-livestream` 链接到 DSH 主目录的插件目录（例如 `$DSH_HOME/profiles/web/node_modules/dsh-livestream`），重启 DSH。之后改控制台和舞台页会自动刷新，改宿主端再重启 DSH，详见 [docs/dev.md](docs/dev.md)。
+`dev` 会盯着源码、改哪建哪；把 `packages/dsh-livestream` 链接到 DSH 主目录的插件目录（例如 `$DSH_HOME/profiles/web/node_modules/dsh-livestream`）。首次构建完成后，在仓库根目录另开终端启动 DSH：
+
+```bash
+dsh web --patch ./packages/dsh-livestream/lib/cordis.hmr.patch.yml
+```
+
+如果终端已在 `packages/dsh-livestream/` 目录，改用 `dsh web --patch ./lib/cordis.hmr.patch.yml`。`--patch` 的相对路径从当前终端目录解析。
+
+之后改控制台、舞台页和宿主端都会自动生效。宿主端使用框架自带的 HMR，配置由 `dev` 自动生成，详见 [docs/dev.md](docs/dev.md)。
 
 密钥写在 DSH 主目录的 `.env`：
 
 ```
 BILIBILI_COOKIE=...
+NETEASE_COOKIE=...
 DOUBAO_TTS_API_KEY=...
 DOUBAO_TTS_APP_ID=...
 DOUBAO_TTS_ACCESS_KEY=...
 ```
+
+`NETEASE_COOKIE` 可选；未配置时使用公开音源。控制台预览静音，音乐由 OBS 中打开的舞台页播放。
 
 然后在 DSH 侧边栏打开「直播」：填房间号，选「本地彩排」或「推流到 B 站」，开播。
 

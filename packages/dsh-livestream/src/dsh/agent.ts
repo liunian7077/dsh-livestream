@@ -17,7 +17,7 @@ import { VideoNotes } from '../body/watchAlong';
 import { lookupProblem } from '../core/viewerLookup';
 import { splitByMood } from '../core/moodText';
 import { ttsYuan, turnYuan } from '../core/cost';
-import { asr, cookie, currentMoods, dm, hooks, library, markAgentReady, settings, show, social, videos } from './runtime';
+import { asr, cookie, currentMoods, dm, finance, hooks, library, markAgentReady, settings, show, social, videos } from './runtime';
 import { HANDOFF_PREFIX } from '../body/show';
 import { BiliRoom } from '../body/biliRoom';
 import { screenshot } from '../body/obs';
@@ -36,6 +36,8 @@ interface AgentContext {
 /** 已经念过的消息：会话 id + 消息序号 */
 const voiced = new Set<string>();
 
+const SONG_REPLY_ONLY = '这次是网易云点歌结果，只需口头回应；不要搜索、查看或播放 B 站视频，点歌失败也不要换成视频。';
+
 const wordsOf = (event: any): string => (event?.data?.message?.content ?? [])
   .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
   .map((p: any) => p.text.trim()).filter(Boolean).join('\n');
@@ -46,7 +48,7 @@ const wordsOf = (event: any): string => (event?.data?.message?.content ?? [])
  */
 const cursors = new Map<string, number>();
 let watching = false;
-/** 这场直播（她的会话，有游戏线时两个加起来）累计用掉的 token 和钱：舞台上换算成她吃了多少饭，show_stats 告诉她 */
+/** 这场直播（含游戏线）累计用量；日费用与余额另由 finance 持久记账。 */
 const freshUsage = (sessionId: string) => ({ sessionId, tokens: 0, input: 0, cacheRead: 0, output: 0, yuan: 0, priced: true, model: '' });
 let usage = freshUsage('');
 /** 游戏线最近一个时刻里的进度、身体、背包，和她在游戏线上最近说的一句 */
@@ -55,7 +57,7 @@ let gameWords = '';
 /** 游戏线刚收到交接（game_side）：它接下来那一条回复不念（直播线已经回过观众了，那条多半是「收到」「记下了」） */
 let hushNext = false;
 
-function countUsage(sessionId: string, event: any, broadcast = true): void {
+function countUsage(sessionId: string, sourceSession: string, event: any, broadcast = true): void {
   const u = event?.data?.usage;
   const turn = Number(u?.totalTokens);
   if (!Number.isFinite(turn) || turn <= 0) return;
@@ -66,7 +68,9 @@ function countUsage(sessionId: string, event: any, broadcast = true): void {
   usage.output += Number(u.outputTokens) || 0;
   const model = event?.data?.message?.source?.model;
   if (typeof model === 'string') usage.model = model;
-  const yuan = turnYuan(model, u, Number(event?.time) || Date.now());
+  const at = Number(event?.time) || Date.now();
+  finance.recordUsage(sourceSession, Number(event.seq), model, u, at);
+  const yuan = turnYuan(model, u, at);
   if (yuan === null) usage.priced = false; else usage.yuan += yuan;
   if (broadcast) show.stage.broadcast({ type: 'usage', tokens: usage.tokens, turn, ...(typeof model === 'string' ? { model } : {}) });
 }
@@ -94,7 +98,7 @@ function watchSession(ctx: AgentContext, sessionId: string, line: 'live' | 'game
   if (!cursors.has(sessionId)) {
     cursors.set(sessionId, Number(session.seq));
     if (line === 'live') usage = freshUsage(sessionId);
-    for (const event of (session.snapshotEvents(0) as any[]) ?? []) if (event?.type === 'assistant/message') countUsage(total, event, false);
+    for (const event of (session.snapshotEvents(0) as any[]) ?? []) if (event?.type === 'assistant/message') countUsage(total, sessionId, event, false);
     if (usage.tokens) show.stage.broadcast({ type: 'usage', tokens: usage.tokens, turn: 0, ...(usage.model ? { model: usage.model } : {}) });
     return;
   }
@@ -113,7 +117,7 @@ function watchSession(ctx: AgentContext, sessionId: string, line: 'live' | 'game
         publishGameNow(true);
       }
     } else if (event?.type === 'assistant/message') {
-      countUsage(total, event);
+      countUsage(total, sessionId, event);
       const key = `${sessionId}:${event.seq}`;
       if (voiced.has(key)) continue;
       voiced.add(key);
@@ -258,17 +262,24 @@ async function completeWithDsh(ctx: AgentContext, model: string, system: string,
   if (!llm) throw new Error('DSH 的模型服务不可用');
   const slash = model.indexOf('/');
   let out = '';
-  for await (const chunk of llm.stream({
-    provider: model.slice(0, slash),
-    model: model.slice(slash + 1),
-    system,
-    messages: [{ id: randomUUID(), role: 'user', content: [{ type: 'text', text: user }], source: { kind: 'dsh-livestream' } }],
-    maxTokens: 3000,
-    reasoningEffort: 'off',
-    purpose: 'dsh-livestream-memory',
-    signal: AbortSignal.timeout(120_000),
-  })) {
-    if (chunk.type === 'text-delta') out += chunk.text;
+  let used: any = null;
+  const requestId = randomUUID();
+  try {
+    for await (const chunk of llm.stream({
+      provider: model.slice(0, slash),
+      model: model.slice(slash + 1),
+      system,
+      messages: [{ id: randomUUID(), role: 'user', content: [{ type: 'text', text: user }], source: { kind: 'dsh-livestream' } }],
+      maxTokens: 3000,
+      reasoningEffort: 'off',
+      purpose: 'dsh-livestream-memory',
+      signal: AbortSignal.timeout(120_000),
+    })) {
+      if (chunk.type === 'text-delta') out += chunk.text;
+      if (chunk.usage) used = chunk.usage;
+    }
+  } finally {
+    if (used) finance.recordUsage(`memory:${requestId}`, 0, model, used, Date.now());
   }
   return out.trim();
 }
@@ -691,6 +702,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
+      if (show.isSongReply) return SONG_REPLY_ONLY;
       const query = String(args.query ?? '').trim();
       const up = String(args.up ?? '').trim() || undefined;
       if (!query && !up) return 'query 和 up 至少填一个。';
@@ -716,6 +728,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
+      if (show.isSongReply) return SONG_REPLY_ONLY;
       const found = await findVideo(args.video, args.part);
       if (typeof found === 'string') return found;
       const { info, part } = found;
@@ -747,6 +760,7 @@ ${profileText(profile)}` : '没打开自己的主页（B 站没返回，可能�
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text' as const, text: value }] },
     async execute(args) {
+      if (show.isSongReply) return SONG_REPLY_ONLY;
       const found = await findVideo(args.video, args.part);
       if (typeof found === 'string') return found;
       const { info, part } = found;
