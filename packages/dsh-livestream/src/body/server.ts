@@ -2,7 +2,7 @@
  * 舞台服务器：插件自己开一个端口（DSH 网页版和桌面版都能用），OBS 的浏览器源直接打开它。
  *
  *   GET  /?token=…                 舞台页（按当前模板摆好挂件）
- *   GET  /stage.js /stage.css       舞台页的代码（插件包 lib/）
+ *   GET  /stage.js /stage.js.map /stage.css   舞台页的代码（插件包 lib/）
  *   GET  /characters/<id>/<file>   角色包、/templates/<id>/<file> 模板（见 packs.ts）
  *   GET  /events?token=…           舞台事件流（SSE）
  *   POST /said?id=…&token=…        舞台念完一句
@@ -10,9 +10,10 @@
  *   POST /media?id=…&state=…&token=…  视频开始放、放完、放不出来
  *
  * 所有请求都要带 token（OBS 里填的地址自带），只监听本机。
+ * 开发时（pnpm dev）lib/stage.js 或 stage/stage.css 一重建，就让开着的舞台页自己刷新。
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname, join, normalize, sep } from 'node:path';
 import { Readable } from 'node:stream';
@@ -35,6 +36,7 @@ const TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
   '.mp3': 'audio/mpeg',
+  '.map': 'application/json; charset=utf-8',
 };
 
 export interface StageServerOptions {
@@ -54,19 +56,25 @@ export interface StageServerOptions {
   log?(level: 'info' | 'warn', message: string): void;
 }
 
+/** 舞台页的脚本（构建产物） */
+const stageScript = (packageDir: string): string => join(packageDir, 'lib', 'stage.js');
+
 export class StageServer {
   private server: Server | null = null;
 
-  /** 舞台页代码的版本：lib/stage.js 的修改时间。插件更新、DSH 重启后变，开着的舞台页（OBS）看到就自己刷新 */
-  private readonly build: string;
+  /** 实际监听的端口（传 0 时由系统挑） */
+  private port: number;
+
+  /** 开发时盯着的文件：重建了就让开着的舞台页刷新（OBS 的浏览器源不会自己刷新） */
+  private readonly watched = new Set<string>();
+  private reloadTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: StageServerOptions) {
-    const script = join(options.packageDir, 'lib', 'stage.js');
-    this.build = existsSync(script) ? String(Math.round(statSync(script).mtimeMs)) : '';
+    this.port = options.port;
   }
 
   get url(): string {
-    return `http://127.0.0.1:${this.options.port}/?token=${this.options.token}`;
+    return `http://127.0.0.1:${this.port}/?token=${this.options.token}`;
   }
 
   start(): Promise<void> {
@@ -83,15 +91,64 @@ export class StageServer {
       server.listen(this.options.port, '127.0.0.1', () => {
         server.off('error', reject);
         this.server = server;
+        const address = server.address();
+        if (address && typeof address === 'object') this.port = address.port;
+        this.watchStageFiles();
         resolve();
       });
     });
   }
 
   stop(): void {
+    if (this.reloadTimer) clearTimeout(this.reloadTimer);
+    this.reloadTimer = null;
+    for (const file of this.watched) unwatchFile(file, this.onStageFile);
+    this.watched.clear();
     this.server?.closeAllConnections();
     this.server?.close();
     this.server = null;
+  }
+
+  // ── 开发时热刷新 ────────────────────────────────────
+
+  /**
+   * 盯着舞台页的文件：lib/stage.js 是构建产物，stage/index.html 和 stage/stage.css 是舞台自己的页面和样式。
+   * 用轮询而不是 inotify：网络盘、虚拟机挂载上 fs.watch 经常收不到。
+   */
+  private watchStageFiles(): void {
+    const stageDir = join(this.options.packageDir, 'stage');
+    for (const file of [stageScript(this.options.packageDir), join(stageDir, 'index.html'), join(stageDir, 'stage.css')]) {
+      if (this.watched.has(file)) continue;
+      watchFile(file, { interval: 400, persistent: false }, this.onStageFile);
+      this.watched.add(file);
+    }
+  }
+
+  private readonly onStageFile = (current: Stats, previous: Stats): void => {
+    if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return;
+    if (!current.isFile() || current.size === 0) return;
+    this.scheduleReload();
+  };
+
+  /** 一次重建可能连着改好几个文件：合并成一次刷新 */
+  private scheduleReload(): void {
+    if (!this.server) return;
+    if (this.reloadTimer) clearTimeout(this.reloadTimer);
+    this.reloadTimer = setTimeout(() => {
+      this.reloadTimer = null;
+      this.options.stage.broadcast({ type: 'reload' });
+      this.options.log?.('info', '舞台页的代码或样式重建了：让开着的舞台页刷新');
+    }, 120);
+  }
+
+  /** 舞台页代码的版本：lib/stage.js 的修改时间和大小。变了，开着的舞台页（OBS）下次连上就自己刷新 */
+  private stamp(file: string): string {
+    try {
+      const stats = statSync(file);
+      return `${Math.round(stats.mtimeMs)}-${stats.size}`;
+    } catch {
+      return '';
+    }
   }
 
   // ── 请求 ────────────────────────────────────────────
@@ -128,7 +185,8 @@ export class StageServer {
     if (path === '/events') return this.events(req, res, url);
     if (path === '/video') return this.video(req, res, url.searchParams.get('id') ?? '');
     if (path === '/' || path === '/index.html') return this.file(res, join(this.options.packageDir, 'stage', 'index.html'));
-    if (path === '/stage.js') return this.file(res, join(this.options.packageDir, 'lib', 'stage.js'));
+    // 开发时带 sourcemap：舞台页的 DevTools 里直接看 src/stage 的源码
+    if (path === '/stage.js' || path === '/stage.js.map') return this.file(res, join(this.options.packageDir, 'lib', path.slice(1)));
     if (path === '/stage.css') return this.file(res, join(this.options.packageDir, 'stage', 'stage.css'));
     const pack = /^\/(characters|templates)\/([\w-]{1,64})\/(.+)$/.exec(path);
     if (pack) {
@@ -149,7 +207,7 @@ export class StageServer {
     const { character, template } = this.options.current();
     const c = this.options.packs.character(character);
     const t = this.options.packs.template(template);
-    if (c && t) send({ v: 1, type: 'hello', character: c, template: t, build: this.build, at: Date.now() });
+    if (c && t) send({ v: 1, type: 'hello', character: c, template: t, build: this.stamp(stageScript(this.options.packageDir)), at: Date.now() });
     // ?preview=1：控制台里的预览，静音、不回执
     const unsubscribe = this.options.stage.subscribe(send, url.searchParams.get('preview') !== '1');
     const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
@@ -208,9 +266,11 @@ export class StageServer {
       res.end();
       return;
     }
+    const ext = extname(resolved).toLowerCase();
     res.writeHead(200, {
-      'content-type': TYPES[extname(resolved).toLowerCase()] ?? 'application/octet-stream',
-      'cache-control': extname(resolved) === '.html' || extname(resolved) === '.js' ? 'no-store' : 'max-age=3600',
+      'content-type': TYPES[ext] ?? 'application/octet-stream',
+      // 开发时重建过就要拿到新的：页面、脚本和它的 sourcemap 都不缓存
+      'cache-control': ext === '.html' || ext === '.js' || ext === '.map' ? 'no-store' : 'max-age=3600',
     });
     res.end(readFileSync(resolved));
   }

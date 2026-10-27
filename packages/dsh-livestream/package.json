@@ -40,7 +40,9 @@
     }
   },
   "scripts": {
-    "build": "node build.mjs",
+    "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsdown",
+    "dev": "tsdown --watch",
+    "dev:web": "tsdown --watch -c tsdown.web.config.ts",
     "check": "tsc -p tsconfig.json",
     "test": "vitest run"
   },
@@ -56,6 +58,7 @@
     "qrcode": "1.5.4",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "tsdown": "0.23.2",
     "typescript": "6.0.3",
     "vitest": "3.2.4",
     "ws": "8.18.3"

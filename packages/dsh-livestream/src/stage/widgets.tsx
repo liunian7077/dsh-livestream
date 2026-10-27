@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import type { CharacterManifest, StageLiveEvent, StageUser } from './protocol';
 import { assetUrl, dropAlert, energy, riceOf, getState, litChars, mediaUrl, preview, reportMedia, subscribe, type Alert, type ReplyItem, type StageState } from './store';
 import { giftTier } from './triggers';
+import { clipBox, clipVideoStyle } from './layout';
 
 export function useStage(): StageState {
   return useSyncExternalStore(subscribe, getState);
@@ -101,11 +102,13 @@ function ClipCharacter({ character }: { character: CharacterManifest }) {
     if (!clips.graph) return;
     void fetch(assetUrl('characters', character.id, clips.graph)).then((r) => (r.ok ? r.json() : null)).then(setGraph).catch(() => {});
   }, [character.id, clips.graph]);
-  const [w, h] = clips.size;
+  // 画面里真正有内容的那一块铺满挂件（16:9 的全身构图里人物只占中间一小块，不铺满会显得很小）
+  const [w, h] = clipBox(clips);
+  const videoStyle = clipVideoStyle(clips.size, clips.frame);
   return (
     <div className={`ls-character${line ? ' ls-speaking' : ''}`} data-mood={line?.mood || undefined} style={{ aspectRatio: `${w} / ${h}` }}>
       <Halo />
-      <ClipPlayer src={(name) => assetUrl('characters', character.id, name)} name={queue[0]} loop={queue.length <= 1} onEnded={next} names={allClips(character)} graph={graph} />
+      <ClipPlayer src={(name) => assetUrl('characters', character.id, name)} name={queue[0]} loop={queue.length <= 1} onEnded={next} names={allClips(character)} graph={graph} videoStyle={videoStyle} />
     </div>
   );
 }
@@ -143,7 +146,7 @@ interface ClipGraph {
  * 不会有一帧空白（照 dsh-game 的大肥鱼）。
  * 有转场表（graph）时挑最像的帧切、直接切再轻轻回弹；没有就新的淡入 0.18 秒
  */
-function ClipPlayer({ src, name, loop, onEnded, names, graph }: { src: (name: string) => string; name: string; loop: boolean; onEnded: () => void; names: string[]; graph: ClipGraph | null }) {
+function ClipPlayer({ src, name, loop, onEnded, names, graph, videoStyle }: { src: (name: string) => string; name: string; loop: boolean; onEnded: () => void; names: string[]; graph: ClipGraph | null; videoStyle?: React.CSSProperties }) {
   const box = useRef<HTMLDivElement>(null);
   const refs = [useRef<HTMLVideoElement>(null), useRef<HTMLVideoElement>(null)];
   const [front, setFront] = useState(0);
@@ -246,9 +249,10 @@ function ClipPlayer({ src, name, loop, onEnded, names, graph }: { src: (name: st
   }, []);
 
   return (
-    <div className={`ls-clips${graph ? ' ls-cut' : ''}`} ref={box}>
+    <div className={`ls-clips${graph ? ' ls-cut' : ''}${videoStyle ? ' ls-framed' : ''}`} ref={box}>
       {refs.map((ref, i) => (
         <video key={i} ref={ref} muted playsInline
+          style={videoStyle}
           data-role={i === front ? 'front' : i === prev ? 'prev' : undefined}
           onEnded={() => { if (i === frontRef.current) onEnded(); }} />
       ))}

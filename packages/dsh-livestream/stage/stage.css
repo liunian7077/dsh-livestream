@@ -155,6 +155,8 @@ html, body {
 .ls-character { position: relative; width: 100%; transition: --ls-mood 0.8s ease; }
 .ls-clips { position: absolute; inset: 0; z-index: 1; }
 .ls-clips video { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
+/* 角色包写了 clips.frame（人物只占画面中间一块）：<video> 按那块放大，位置由内联样式给 */
+.ls-clips.ls-framed video { inset: auto; }
 .ls-clips video[data-role=prev] { opacity: 1; z-index: 1; }
 /* 换片段时新的一段淡入 0.18 秒：盖住两段动作、色调的小差异（太短会看出跳一下） */
 .ls-clips video[data-role=front] { opacity: 1; z-index: 2; animation: ls-clip-in 0.18s ease-out; }

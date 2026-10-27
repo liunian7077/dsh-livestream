@@ -58,3 +58,30 @@ export function gameRect(t: TemplateManifest): { x: number; y: number; w: number
   const [cw, ch] = t.canvas;
   return slot ? { x: slot.x, y: slot.y, w: slot.w ?? cw, h: slot.h ?? ch } : { x: 0, y: 0, w: cw, h: ch };
 }
+
+/**
+ * 片段画面里要铺满挂件的那一块：角色包写了 frame 就用它，不然就是整幅画面（返回宽高）。
+ * 挂件按这个比例摆，人物不会被 16:9 的画幅拖着缩在中间。
+ */
+export function clipBox(clips: { size: [number, number]; frame?: [number, number, number, number] }): [number, number] {
+  const frame = clips.frame;
+  return frame ? [frame[2], frame[3]] : clips.size;
+}
+
+/**
+ * 有 frame 时 <video> 的摆放：把那一块放大到挂件大小（百分比，相对挂件自己的宽高）。
+ * 返回 undefined 表示整幅画面就是挂件，按 100% 铺满即可。
+ */
+export function clipVideoStyle(
+  size: [number, number],
+  frame: [number, number, number, number] | undefined,
+): { left: string; top: string; width: string; height: string } | undefined {
+  if (!frame) return undefined;
+  const [x, y, w, h] = frame;
+  return {
+    left: `${(-x / w) * 100}%`,
+    top: `${(-y / h) * 100}%`,
+    width: `${(size[0] / w) * 100}%`,
+    height: `${(size[1] / h) * 100}%`,
+  };
+}

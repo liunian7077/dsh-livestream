@@ -23,6 +23,11 @@ export interface CharacterManifest {
   /** 动画片段渲染器：待机循环、说话循环；有表情时先播 out，再播表情，再播 in 回到说话 */
   clips?: {
     size: [number, number];
+    /**
+     * 画面里真正有内容的那一块（像素，相对 size）：挂件按这块的比例摆放、把它铺满。
+     * 片段是 16:9 的全身构图、人物只占中间一小块时写它，人物就不会缩在框子中间；不写就是整幅画面
+     */
+    frame?: [number, number, number, number];
     idle: string;
     talk: string;
     out?: string;

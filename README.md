@@ -74,10 +74,10 @@
 
 ```bash
 pnpm install
-pnpm -C packages/dsh-livestream build
+pnpm -C packages/dsh-livestream dev
 ```
 
-把 `packages/dsh-livestream` 链接到 DSH 主目录的插件目录（例如 `$DSH_HOME/profiles/web/node_modules/dsh-livestream`），重启 DSH。
+`dev` 会盯着源码、改哪建哪；把 `packages/dsh-livestream` 链接到 DSH 主目录的插件目录（例如 `$DSH_HOME/profiles/web/node_modules/dsh-livestream`），重启 DSH。之后改控制台和舞台页会自动刷新，改宿主端再重启 DSH，详见 [docs/dev.md](docs/dev.md)。
 
 密钥写在 DSH 主目录的 `.env`：
 

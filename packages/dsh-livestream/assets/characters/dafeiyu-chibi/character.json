@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "id": "dafeiyu-chibi",
+  "name": "大肥鱼·Q版",
+  "names": ["大肥鱼", "肥鱼", "鲸鱼娘", "小肥鱼"],
+  "voice": "zh_female_mengyatou_uranus_bigtts",
+  "renderer": "clips",
+  "license": "CC BY-NC-SA 4.0（见 LICENSE.md）",
+  "clips": {
+    "size": [640, 360],
+    "frame": [150, 10, 370, 345],
+    "idle": "clips/idle-breathe.webm",
+    "talk": "clips/mutter-screen.webm",
+    "moods": {
+      "laugh": "clips/click-happy.webm",
+      "shy": "clips/click-shy.webm",
+      "angry": "clips/click-pout.webm",
+      "sad": "clips/work-sigh-sweat.webm",
+      "scared": "clips/startled-awake.webm",
+      "shocked": "clips/startled-jump.webm",
+      "think": "clips/work-thinking.webm"
+    }
+  },
+  "reactions": {
+    "gift.big": "shy",
+    "gift.huge": "laugh",
+    "superchat.big": "shocked",
+    "membership": "shocked"
+  },
+  "art": {
+    "portrait": "art/portrait.webp",
+    "waiting": "art/memes/deep-sleep.png",
+    "updating": "art/memes/dead.png",
+    "ending": "art/memes/full-belly.png",
+    "rice": "art/memes/eat-white-rice.png",
+    "laptop": "art/memes/big-burner.png",
+    "gift": "art/memes/awesome-whale.png",
+    "wave": "art/memes/ciallo.png",
+    "kv": "art/memes/cute.png"
+  }
+}
