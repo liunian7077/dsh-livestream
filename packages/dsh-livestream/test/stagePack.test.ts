@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Packs } from '../src/body/packs';
@@ -49,6 +50,8 @@ describe('stage server serves a character pack', () => {
     expect(hello.type).toBe('hello');
     expect(hello.character.id).toBe('dafeiyu-chibi');
     expect(hello.character.clips.frame).toEqual([150, 10, 370, 345]);
-    expect(Object.keys(hello.character.clips.moods).sort()).toEqual(['angry', 'laugh', 'sad', 'scared', 'shocked', 'shy', 'think']);
+    const manifest = JSON.parse(readFileSync(join(packageDir, 'assets', 'characters', 'dafeiyu-chibi', 'character.json'), 'utf8'));
+    expect(hello.character.clips.moods).toEqual(manifest.clips.moods);
+    expect(Object.keys(hello.character.clips.moods)).toEqual(expect.arrayContaining(['angry', 'laugh', 'sad', 'scared', 'shocked', 'shy', 'think', 'hum-song', 'unwrap-gift']));
   }, 20_000);
 });

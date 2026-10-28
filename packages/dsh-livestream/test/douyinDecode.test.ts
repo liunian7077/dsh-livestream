@@ -31,6 +31,22 @@ function read(outputs: ReturnType<typeof decodeDouyinMessage>) {
 beforeEach(() => resetDouyinDecode());
 
 describe('douyin decode', () => {
+  it.each([
+    ['seconds', T, AT],
+    ['milliseconds', AT + 123, AT + 123],
+    ['missing timestamp', 0, AT + 500],
+    ['future clock', AT + 60_000, AT + 500],
+    ['unsafe timestamp', 9_007_199_254_740_992n, AT + 500],
+  ])('normalizes %s to a usable event time', (_label, timestamp, expected) => {
+    const payload = pbWrite(
+      pbWriteBytes(1, pbWrite(pbWriteVarint(2, 111), pbWriteVarint(4, timestamp))),
+      pbWriteBytes(2, user({ id: 42n, name: '观众' })),
+      pbWriteBytes(3, '你好'),
+    );
+    const [event] = read(decodeDouyinMessage('WebcastChatMessage', payload, {}, AT + 500));
+    expect(event.ts).toBe(expected);
+  });
+
   it('reads a chat message, keeping the 19-digit user id exact', () => {
     // 7351234567890123456 > Number.MAX_SAFE_INTEGER，过 Number 会变成 …456000
     const payload = pbWrite(

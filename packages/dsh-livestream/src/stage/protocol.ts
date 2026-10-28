@@ -8,6 +8,7 @@
  */
 
 import type { LiveConnectionState, LivePlatform } from '../core/live';
+import type { BackgroundMusicSettings } from './backgroundMusic';
 
 export const STAGE_PROTOCOL = 1;
 
@@ -254,6 +255,7 @@ export type StageEvent =
   /** 这场直播她用掉的 token（累计）；turn 是刚结束的这一步用的，model 是哪个模型 */
   | { v: 1; type: 'usage'; tokens: number; turn?: number; model?: string; at: number }
   | { v: 1; type: 'finance'; finance: StageFinance; at: number }
+  | { v: 1; type: 'backgroundMusic'; settings: BackgroundMusicSettings; at: number }
   /**
    * 放视频（她用 play_video）：舞台换成 video 布局，从 from 秒放到 until 秒；她说话时视频声音调小。
    * 中途连上的舞台从 from + (现在 - at) 接着放。stop：停下、换回平时的布局

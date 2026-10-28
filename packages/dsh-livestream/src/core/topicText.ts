@@ -154,6 +154,12 @@ function body(topic: Topic, ctx: TopicContext): Body {
       const artists = topic.song?.artists.length ? cleanText(topic.song.artists.join('、')) : '';
       const track = artists ? `《${name}》(${artists})` : `《${name}》`;
       switch (topic.outcome) {
+        case 'blocked':
+          return {
+            what: ['有一条点歌请求被直播间的点歌规则拦截，没有加入队列，也不会播放。'],
+            how: '只简短说明“这首歌不开放点播，请换一首”。不要复述请求、歌名或歌词，不要演唱、哼唱，也不要搜索其他音视频版本代替播放。',
+            maxChars: 30,
+          };
         case 'loading':
           return {
             what: [`${who} 点了一首歌：${asked}。找到了 ${track}，已取得音源，正在等待舞台开始播放。`],
@@ -243,7 +249,7 @@ function body(topic: Topic, ctx: TopicContext): Body {
       };
     }
     case 'idle':
-      return { what: ['直播间这会儿没人发弹幕。'], how: '自己找点话说：讲一件你作为 AI 的真实小事，问观众一个具体、好回答的问题，或者找个 B 站视频放给大家一起看。', maxChars: 70 };
+      return { what: ['直播间这会儿没人发弹幕。'], how: '聊一个轻松的日常话题，或问观众一个具体、好回答的问题。不要编造实时新闻或观众互动，不主动搜索或播放外部音视频。', maxChars: 70 };
   }
 }
 

@@ -20,8 +20,10 @@ import type { GameSource, GiftPrice, StageEvent } from '../stage/protocol';
 import { splitByMood } from '../core/moodText';
 import { speakable } from '../core/speakable';
 import { GUEST_VOICE } from '../body/voices';
+import { chooseLivePreset, livePresetOptions, type LivePresetOption, type PresetComposition } from '../core/livePresets';
 import { agentReady, asr, broadcast, cookie, cookieFor, DEFAULT_BOARD, hooks, placeGame, publishBoard, publishNotice, publishSongs, publishStageTitle, SECRETS, social, songbook, songView, takeLive, currentCharacter, currentMoods, dm, packs, prepareSpeech, server, settings, show, updateSettings, watchInbox, type Pace, type Settings } from './runtime';
 import { currentPlatform, douyinProfiles, finance, publishFinance } from './runtime';
+import { publishBackgroundMusic } from './runtime';
 
 export const name = 'dsh-livestream';
 export const inject = ['connection'];
@@ -164,6 +166,12 @@ async function resumeLive(ctx: HostContext, stopped: () => boolean): Promise<voi
 }
 
 export function apply(ctx: HostContext): void {
+  const readLivePresets = async (): Promise<LivePresetOption[]> => {
+    const registry = ctx.get?.('agentPresets') ?? ctx.agentPresets;
+    if (!registry?.compositionInventory) throw new Error('当前 DSH 不支持读取预设组成，请更新 DSH 后重试。');
+    const compositions: PresetComposition[] = await registry.compositionInventory();
+    return livePresetOptions(compositions);
+  };
   let waitingOffair: NodeJS.Timeout | null = null;
   let endingTimer: NodeJS.Timeout | null = null;
   const eventStreams = new Set<() => void>();
@@ -206,6 +214,10 @@ export function apply(ctx: HostContext): void {
     ctx.effect(() => ctx.connection.fetch.register({ path, methods, requestBody: 'buffered', fetch }), label);
 
   route('/api/dsh-livestream/state', ['GET'], () => json(state()), 'state');
+  route('/api/dsh-livestream/presets', ['GET'], async () => {
+    try { return json({ ok: true, presets: await readLivePresets() }); }
+    catch (error) { return fail((error as Error).message); }
+  }, 'live presets');
 
   route('/api/dsh-livestream/douyin/login', ['POST'], async () => {
     try {
@@ -219,6 +231,14 @@ export function apply(ctx: HostContext): void {
   route('/api/dsh-livestream/settings', ['POST'], async (request) => {
     const patch = await body<Partial<Settings>>(request);
     const next: Partial<Settings> = {};
+    if (patch.agentPreset !== undefined) {
+      if (show.isOnAir) return fail('请先下播，再切换主播 Agent 预设。');
+      if (typeof patch.agentPreset !== 'string') return fail('主播预设编号无效。');
+      const id = patch.agentPreset.trim();
+      try { chooseLivePreset(await readLivePresets(), id); }
+      catch (error) { return fail((error as Error).message); }
+      next.agentPreset = id;
+    }
     if (patch.roomId !== undefined) {
       const room = Number(patch.roomId);
       if (!Number.isInteger(room) || room <= 0) return fail('房间号要是正整数');
@@ -257,6 +277,12 @@ export function apply(ctx: HostContext): void {
     if (patch.boardText !== undefined) next.boardText = String(patch.boardText).replace(/\r/g, '').slice(0, 1000);
     if (patch.noticeText !== undefined) next.noticeText = String(patch.noticeText).replace(/\s+/g, ' ').trim().slice(0, 200);
     if (patch.songRequest !== undefined) next.songRequest = !!patch.songRequest;
+    if (patch.backgroundMusic !== undefined) next.backgroundMusic = !!patch.backgroundMusic;
+    if (patch.backgroundMusicVolume !== undefined) {
+      const volume = Number(patch.backgroundMusicVolume);
+      if (!Number.isFinite(volume) || volume < 0 || volume > 100) return fail('背景音乐音量要在 0～100 之间');
+      next.backgroundMusicVolume = volume;
+    }
     if (patch.songQueueMax !== undefined) next.songQueueMax = Math.max(1, Math.min(100, Number(patch.songQueueMax) || 20));
     if (patch.songPerUserMax !== undefined) next.songPerUserMax = Math.max(1, Math.min(5, Number(patch.songPerUserMax) || 2));
     if (patch.initialBalanceYuan !== undefined) {
@@ -297,6 +323,7 @@ export function apply(ctx: HostContext): void {
     if (next.boardText !== undefined) publishBoard();
     if (next.noticeText !== undefined) publishNotice();
     if (next.songRequest !== undefined) publishSongs();
+    if (next.backgroundMusic !== undefined || next.backgroundMusicVolume !== undefined) publishBackgroundMusic();
     if (next.character) show.setNames(currentCharacter()?.names ?? []);
     if (repaint) show.stage.broadcast({ type: 'reload' });
     // 换了主题，游戏位可能挪了：OBS 里的游戏画面跟着挪

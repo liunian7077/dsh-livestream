@@ -5,7 +5,7 @@ import type { SongQuery } from '../src/core/songRequest';
 
 /**
  * 点歌队列：搜到就排、搜不到就说没有、同一首不重复、一人不能连点、
- * 轮到时交给客户端播、按歌曲时长换下一首。
+ * 轮到时解析音源，按舞台的实际播放回执换下一首。
  */
 
 const track = (id: string, name: string, durationMs = 200_000): NeteaseSong => ({
@@ -13,6 +13,7 @@ const track = (id: string, name: string, durationMs = 200_000): NeteaseSong => (
 });
 
 const pick = (title: string): SongQuery => ({ title, raw: title });
+const books: Songbook[] = [];
 
 function make(overrides: Partial<ConstructorParameters<typeof Songbook>[0]> = {}) {
   const played: NeteaseSong[] = [];
@@ -22,9 +23,10 @@ function make(overrides: Partial<ConstructorParameters<typeof Songbook>[0]> = {}
       if (query.title === '炸了') throw new Error('网断了');
       return { ...track(`id-${query.title}`, query.title), score: 1 };
     },
-    play: (song) => played.push(song),
+    resolve: async (song) => { played.push(song); return `https://audio.example/${song.id}`; },
     ...overrides,
   });
+  books.push(book);
   return { book, played };
 }
 
@@ -32,13 +34,14 @@ const alice = { id: 'u1', name: '爱丽丝' };
 const bob = { id: 'u2', name: '鲍勃' };
 
 afterEach(() => {
+  for (const book of books.splice(0)) book.stop();
   vi.useRealTimers();
 });
 
 describe('songbook', () => {
   it('plays the first request right away and queues the rest', async () => {
     const { book, played } = make();
-    expect(await book.request(pick('第一首'), alice)).toEqual({ kind: 'playing', song: expect.objectContaining({ name: '第一首' }), by: alice });
+    expect(await book.request(pick('第一首'), alice)).toEqual({ kind: 'loading', song: expect.objectContaining({ name: '第一首' }), by: alice });
     expect(played.map((s) => s.name)).toEqual(['第一首']);
 
     const second = await book.request(pick('第二首'), bob);
@@ -61,7 +64,7 @@ describe('songbook', () => {
 
   it('refuses the same song twice', async () => {
     const { book } = make();
-    expect((await book.request(pick('晴天'), alice)).kind).toBe('playing');
+    expect((await book.request(pick('晴天'), alice)).kind).toBe('loading');
     expect((await book.request(pick('晴天'), bob)).kind).toBe('duplicate');
     // 换个人点另一首是正常的
     expect((await book.request(pick('稻香'), bob)).kind).toBe('queued');
@@ -69,7 +72,7 @@ describe('songbook', () => {
 
   it('limits how many one viewer can pin at once', async () => {
     const { book } = make({ maxPerUser: 1 });
-    expect((await book.request(pick('一'), alice)).kind).toBe('playing');
+    expect((await book.request(pick('一'), alice)).kind).toBe('loading');
     expect((await book.request(pick('二'), alice)).kind).toBe('tooMany');
     expect((await book.request(pick('三'), bob)).kind).toBe('queued');
   });
@@ -93,10 +96,10 @@ describe('songbook', () => {
     await book.request(pick('下一首'), bob);
 
     expect(played.map((s) => s.name)).toEqual(['短的']);
-    // 时长 + 宽限（6 秒）之后换下一首
-    vi.advanceTimersByTime(200_000 + 5_999);
-    expect(played.map((s) => s.name)).toEqual(['短的']);
-    vi.advanceTimersByTime(1);
+    const first = book.playing!;
+    book.report(first.seq, 'playing', 1000);
+    book.report(first.seq, 'ended', 200_000);
+    await vi.advanceTimersByTimeAsync(0);
     expect(played.map((s) => s.name)).toEqual(['短的', '下一首']);
     expect(book.playing?.song.name).toBe('下一首');
     expect(book.recent.map((q) => q.song.name)).toEqual(['短的']);
@@ -110,7 +113,7 @@ describe('songbook', () => {
 
     expect(book.clear()).toBe(2);
     expect(book.waiting).toEqual([]);
-    expect(book.next()).toBeNull();
+    expect(await book.next()).toBeNull();
     expect(book.playing).toBeNull();
     expect(played.map((s) => s.name)).toEqual(['一']);
   });

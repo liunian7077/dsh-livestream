@@ -18,7 +18,7 @@ describe('douyin signer (bundled, offline)', () => {
     expect(existsSync(file)).toBe(true);
     // 缓存路径是另一回事：不联网时不应该依赖它
     expect(file).not.toBe(signFilePath());
-    expect(file).toContain('third_party/douyin-sign/sign.js');
+    expect(file).toBe(join(packageRoot(), 'third_party', 'douyin-sign', 'sign.js'));
   });
 
   it('signs without any network access', async () => {

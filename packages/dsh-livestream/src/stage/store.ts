@@ -5,6 +5,7 @@
 
 import type { BrainState, CharacterManifest, GameSource, GameStatus, SongPlaybackReport, StageEvent, StageFinance, StageLiveEvent, StageSongs, StageUser, TemplateManifest } from './protocol';
 import { musicHasPriority } from './protocol';
+import { BackgroundMusic, type BackgroundMusicSettings } from './backgroundMusic';
 import type { LiveConnectionState, LivePlatform } from '../core/live';
 import { viewerName } from '../core/viewerName';
 import { type FxEvent, giftTier, pick, triggersOf } from './triggers';
@@ -152,6 +153,7 @@ export interface StageState {
   notice: string;
   /** 点歌队列（尚未同步时为 null） */
   songs: StageSongs | null;
+  backgroundMusic: BackgroundMusicSettings | null;
   /** 她在直播里玩的游戏的画面来源：舞台换成 game 布局 */
   game: GameSource | null;
   /** 游戏画面上那一行「她在干嘛」 */
@@ -216,7 +218,7 @@ function startUpdating(): void {
 
 let state: StageState = {
   connected: false, character: null, template: null, brain: 'off', brainDetail: '', line: null, speaking: false, lineEndedAt: 0,
-  chats: [], alerts: [], focus: new Set(), reply: [], replySeq: 0, onAir: false, needsClick: false, stageTitle: '',
+  chats: [], alerts: [], focus: new Set(), reply: [], replySeq: 0, onAir: false, needsClick: false, stageTitle: '', backgroundMusic: null,
   phase: wasUpdating() ? 'updating' : 'waiting', stats: freshStats(), tokens: 0, model: '', finance: null, term: [], media: null, board: '', notice: '', songs: null, game: null, gameStatus: null, fx: [], reaction: null,
 };
 const subscribers = new Set<() => void>();
@@ -232,6 +234,8 @@ export function subscribe(notify: () => void): () => void {
 
 function update(change: (s: StageState) => StageState): void {
   state = change(state);
+  backgroundMusic.sync(state);
+  state = { ...state, needsClick: !!pendingClick || !!pendingMusicClick || backgroundMusic.blocked };
   for (const notify of subscribers) notify();
 }
 
@@ -241,6 +245,7 @@ const params = new URLSearchParams(location.search);
 export const token = params.get('token') ?? '';
 /** 控制台里的预览：静音、不回执 */
 export const preview = params.get('preview') === '1';
+const backgroundMusic = new BackgroundMusic(`/background-music.wav?token=${encodeURIComponent(token)}`, () => update((s) => s), preview);
 /** 控制台里刚换了主题：预览页演示一遍开场动画和直播中的样子（只在预览页、没在播的时候） */
 const demo = preview && params.has('demo');
 
@@ -335,13 +340,16 @@ export function unlockAudio(): void {
   update((s) => ({ ...s, needsClick: false }));
   speech?.();
   music?.();
+  backgroundMusic.unlock();
+  update((s) => s);
 }
 
 // 音乐和主播说话各用一个 Audio；控制台预览不播放，也不推进队列。
 let musicAudio: HTMLAudioElement | null = null;
 let musicSeq: number | null = null;
 let pendingMusicClick: (() => void) | null = null;
-/** 角色开口时暂停当前歌曲，说完从原位置继续。 */
+/** 角色开口时只压低音乐音量，歌曲进度不中断。 */
+const MUSIC_SPEECH_VOLUME = 0.2;
 let controlMusic: (() => void) | null = null;
 let musicReports: Promise<unknown> = Promise.resolve();
 
@@ -385,12 +393,9 @@ function syncMusic(songs: StageSongs): void {
   };
   const play = () => {
     if (!active() || player.ended || player.error) return;
-    player.volume = state.speaking ? 0 : 1;
-    if (state.speaking) {
-      if (!player.paused) player.pause();
-      else report('paused', '主播正在说话，结束后继续播放');
-      return;
-    }
+    player.volume = state.speaking ? MUSIC_SPEECH_VOLUME : 1;
+    // 已在播放时只调整音量，不重新 play，也不改变当前进度。
+    if (!player.paused) return;
     void player.play().catch((err: Error) => {
       if (!active() || err.name === 'AbortError') return;
       if (err.name === 'NotAllowedError') {
@@ -409,15 +414,14 @@ function syncMusic(songs: StageSongs): void {
   };
   player.onplaying = () => {
     if (!active()) return;
-    if (state.speaking) { play(); return; }
     pendingMusicClick = null;
     update((s) => ({ ...s, needsClick: !!pendingClick }));
     report('playing');
   };
-  player.onwaiting = () => { if (!state.speaking) report('loading', '音频正在缓冲'); };
-  player.onstalled = () => { if (!state.speaking) report('loading', '音频网络连接暂时停滞，正在等待缓冲'); };
+  player.onwaiting = () => report('loading', '音频正在缓冲');
+  player.onstalled = () => report('loading', '音频网络连接暂时停滞，正在等待缓冲');
   player.onpause = () => {
-    if (!player.ended && !player.error) report('paused', state.speaking ? '主播正在说话，结束后继续播放' : undefined);
+    if (!player.ended && !player.error) report('paused');
   };
   player.ontimeupdate = () => {
     if (!player.paused && !player.ended && !player.seeking && player.readyState >= 3 && Date.now() - lastProgress >= 1000) {
@@ -656,6 +660,7 @@ function handle(event: StageEvent): void {
         return term(next, 'token', `这一步吃掉 ${tokenCount(event.turn)} token ≈ ${Math.max(1, step.grainsOf(event.turn))} 粒米、${energy(step.joules)}电 · 这场共 ${riceOf(event.tokens).grains.toLocaleString()} 粒米`);
       });
     case 'finance': return update((s) => ({ ...s, finance: event.finance }));
+    case 'backgroundMusic': return update((s) => ({ ...s, backgroundMusic: event.settings }));
     case 'media':
       if (event.action === 'play') {
         if (musicHasPriority(state.songs?.playback)) {
@@ -721,7 +726,7 @@ export function connect(): void {
   };
   source.onerror = () => {
     stopMusic();
-    update((s) => ({ ...s, connected: false }));
+    update((s) => ({ ...s, connected: false, songs: null, backgroundMusic: null }));
     // 直播中断线（插件在重启、在更新）：过一会儿还没接上就盖「更新中」
     if (!state.onAir || preview || updatingTimer) return;
     updatingTimer = setTimeout(() => {

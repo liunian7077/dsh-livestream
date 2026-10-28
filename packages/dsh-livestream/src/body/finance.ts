@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { turnYuan, type TurnUsage } from '../core/cost';
 import type { LiveEvent } from '../core/live';
@@ -19,7 +19,24 @@ interface Ledger {
 }
 const emptyDay = (): Day => ({ costYuan: 0, giftYuan: 0, chatGiftYuan: 0, tokens: 0, unpricedTokens: 0 });
 const positive = (n: unknown): number => Number.isFinite(Number(n)) ? Math.max(0, Number(n)) : 0;
-export const beijingDate = (at: number): string => new Date(at + 8 * 3600_000).toISOString().slice(0, 10);
+const BEIJING_OFFSET_MS = 8 * 3600_000;
+export const beijingDate = (at: number): string => new Date(at + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+
+/** 旧版把毫秒又乘了 1000，日期键变成了 "+058792-04"（扩展年份截断到月份）。 */
+function repairedGiftDate(key: string): string | null {
+  const match = /^\+(\d{6})-(\d{2})$/.exec(key);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (year < 10_000 || month < 1 || month > 12) return null;
+  // 原键只剩月份，但除以 1000 后的整个区间不到 45 分钟；只有它完全落在同一天才迁移。
+  const from = (Date.UTC(year, month - 1, 1) - BEIJING_OFFSET_MS) / 1000;
+  const until = (Date.UTC(year, month, 1) - BEIJING_OFFSET_MS) / 1000;
+  if (!Number.isFinite(from) || !Number.isFinite(until)) return null;
+  const day = beijingDate(from);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day !== beijingDate(until - 1) || day > beijingDate(Date.now())) return null;
+  return day;
+}
 
 /** 只存合计和去重游标，不保存观众姓名、弹幕或凭据。 */
 export class Finance {
@@ -37,6 +54,7 @@ export class Finance {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
+    this.repairGiftDates();
   }
 
   snapshot(at = Date.now()): StageFinance {
@@ -98,10 +116,35 @@ export class Finance {
     return this.ledger.days[beijingDate(at)] ??= emptyDay();
   }
 
-  private save(): void {
+  private repairGiftDates(): void {
+    const repairs = Object.entries(this.ledger.days).flatMap(([from, day]) => {
+      const to = repairedGiftDate(from);
+      // 只修复纯礼物账；不猜测成本、用量或无法确定日期的记录。
+      if (!to || day.costYuan !== 0 || day.tokens !== 0 || day.unpricedTokens !== 0
+        || !Number.isFinite(day.giftYuan) || day.giftYuan < 0
+        || !Number.isFinite(day.chatGiftYuan) || day.chatGiftYuan < 0) return [];
+      return [{ from, to, day }];
+    });
+    if (!repairs.length) return;
+    try {
+      copyFileSync(this.file, `${this.file}.before-douyin-time-fix.bak`, constants.COPYFILE_EXCL);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    for (const { from, to, day } of repairs) {
+      const target = this.ledger.days[to] ??= emptyDay();
+      target.giftYuan += day.giftYuan;
+      target.chatGiftYuan += day.chatGiftYuan;
+      delete this.ledger.days[from];
+    }
+    // 构造时宿主的 finance 变量尚未赋值，不能触发引用它的 changed 回调。
+    this.save(false);
+  }
+
+  private save(notify = true): void {
     mkdirSync(dirname(this.file), { recursive: true });
     writeFileSync(`${this.file}.tmp`, JSON.stringify(this.ledger));
     renameSync(`${this.file}.tmp`, this.file);
-    this.changed();
+    if (notify) this.changed();
   }
 }

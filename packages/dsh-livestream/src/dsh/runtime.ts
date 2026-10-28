@@ -43,6 +43,8 @@ export interface Settings {
   roomId: number | null;
   /** 舞台显示名称；留空跟随平台房间标题，未连接时用角色默认名称 */
   stageTitle: string;
+  /** 主播 Agent 预设；空串自动采用 DSH 默认的直播预设。只在新一场开播时应用。 */
+  agentPreset: string;
   character: string;
   template: string;
   /** 空串用角色包的默认音色 */
@@ -79,6 +81,10 @@ export interface Settings {
   noticeText: string;
   /** 点歌：观众发「点歌 歌名 歌手」，插件去网易云搜、排队，由舞台播放 */
   songRequest: boolean;
+  /** 没有点歌时循环播放内置纯音乐。 */
+  backgroundMusic: boolean;
+  /** 背景音乐音量百分比（0～100）。 */
+  backgroundMusicVolume: number;
   /** 点歌队列最多排几首（不含正在放的那首） */
   songQueueMax: number;
   /** 一个人同时最多排几首（含正在放的） */
@@ -134,8 +140,8 @@ export const SECRETS = {
   douyinCookie: 'DOUYIN_COOKIE',
   neteaseCookie: 'NETEASE_COOKIE',
   ttsApiKey: 'DOUBAO_TTS_API_KEY',
-  ttsAppId: 'oyjps4g72UAaknH8',
-  ttsAccessKey: "VxCgNvLTE.ChBveWpwczRnNzJVQWFrbkg4ELeFu-sHGAEqELvYz57MO0_2l1hMSYTrzRY.G9kL9y3RFcMVm38jY3pCItjp3ohZDD6m6HQVQh2iZpFeUzI36jZMLJRFbwZqvUy4gmZG-jqE5ytXOTYnyS6OGgeZ",
+  ttsAppId: 'DOUBAO_TTS_APP_ID',
+  ttsAccessKey: 'DOUBAO_TTS_ACCESS_KEY',
 } as const;
 
 export const PRESET_ID = 'dsh-livestream';
@@ -166,6 +172,7 @@ function loadSettings(): Settings {
     platform: saved.platform === 'douyin' ? 'douyin' : 'bilibili',
     roomId: null,
     stageTitle: '',
+    agentPreset: '',
     character: 'dafeiyu',
     template: 'default',
     voice: '',
@@ -186,6 +193,8 @@ function loadSettings(): Settings {
     boardText: DEFAULT_BOARD,
     noticeText: '',
     songRequest: true,
+    backgroundMusic: true,
+    backgroundMusicVolume: 12,
     songQueueMax: 20,
     songPerUserMax: 2,
     initialBalanceYuan: null,
@@ -195,7 +204,10 @@ function loadSettings(): Settings {
   };
   // 存档里的值可能来自旧版本或被手改过：夹一下范围
   settings.stageTitle = typeof settings.stageTitle === 'string' ? settings.stageTitle.trim().slice(0, 40) : '';
+  settings.agentPreset = typeof settings.agentPreset === 'string' ? settings.agentPreset.trim() : '';
   settings.songRequest = settings.songRequest !== false;
+  settings.backgroundMusic = settings.backgroundMusic !== false;
+  settings.backgroundMusicVolume = Number.isFinite(Number(settings.backgroundMusicVolume)) ? Math.max(0, Math.min(100, Number(settings.backgroundMusicVolume))) : 12;
   settings.songQueueMax = Math.max(1, Math.min(100, Math.round(Number(settings.songQueueMax) || 20)));
   settings.songPerUserMax = Math.max(1, Math.min(5, Math.round(Number(settings.songPerUserMax) || 2)));
   settings.initialBalanceYuan = settings.initialBalanceYuan !== null && Number.isFinite(Number(settings.initialBalanceYuan)) && Number(settings.initialBalanceYuan) >= 0 ? Number(settings.initialBalanceYuan) : null;
@@ -239,9 +251,9 @@ export const hooks: {
 
 async function ttsAuth(): Promise<TtsAuth> {
   const [apiKey, appId, accessKey] = await Promise.all([
-    hooks.secret(SECRETS.ttsApiKey), hooks.secret('DOUBAO_TTS_APP_ID'), hooks.secret('DOUBAO_TTS_ACCESS_KEY'),
+    hooks.secret(SECRETS.ttsApiKey), hooks.secret(SECRETS.ttsAppId), hooks.secret(SECRETS.ttsAccessKey),
   ]);
-  return { apiKey, appId: appId || SECRETS.ttsAppId, accessKey: accessKey || SECRETS.ttsAccessKey };
+  return { apiKey, appId, accessKey };
 }
 
 export const packs = new Packs(packageDir(), dataDir);
@@ -253,6 +265,7 @@ export const packs = new Packs(packageDir(), dataDir);
 export const songbook = new Songbook({
   find: async (query) => findSong(query, await hooks.secret(SECRETS.neteaseCookie)),
   resolve: async (song) => resolveSong(song, await hooks.secret(SECRETS.neteaseCookie)),
+  hasStage: (): boolean => show.stage.watchers > 0,
   log: (level, message) => hooks.log(level, message),
   maxQueue: () => settings.songQueueMax,
   maxPerUser: () => settings.songPerUserMax,
@@ -400,6 +413,11 @@ export function publishSongs(): void {
   });
 }
 publishSongs();
+
+export function publishBackgroundMusic(): void {
+  show.stage.broadcast({ type: 'backgroundMusic', settings: { enabled: settings.backgroundMusic, volume: settings.backgroundMusicVolume / 100 } });
+}
+publishBackgroundMusic();
 
 async function speech(text: string, signal: AbortSignal, voice = currentVoice()): Promise<{ audio: Uint8Array; timeline: Array<{ chars: number; atMs: number }> } | null> {
   const auth = await ttsAuth();

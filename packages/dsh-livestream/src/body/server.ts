@@ -39,6 +39,7 @@ const TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
   '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
   '.map': 'application/json; charset=utf-8',
 };
 
@@ -59,6 +60,7 @@ export interface StageServerOptions {
   music?: {
     source(seq: number): string | null;
     report(seq: number, state: SongPlaybackReport, positionMs?: number, durationMs?: number, detail?: string): void;
+    connect?(): void;
     disconnect?(): void;
   };
   log?(level: 'info' | 'warn', message: string): void;
@@ -216,6 +218,7 @@ export class StageServer {
     if (path === '/events') return this.events(req, res, url);
     if (path === '/video') return this.video(req, res, url.searchParams.get('id') ?? '');
     if (path === '/music') return this.music(req, res, Number(url.searchParams.get('seq')));
+    if (path === '/background-music.wav') return this.file(res, join(this.options.packageDir, 'assets', 'music', 'quiet-room.wav'));
     if (path === '/' || path === '/index.html') return this.file(res, join(this.options.packageDir, 'stage', 'index.html'));
     // 开发时带 sourcemap：舞台页的 DevTools 里直接看 src/stage 的源码
     if (path === '/stage.js' || path === '/stage.js.map') return this.file(res, join(this.options.packageDir, 'lib', path.slice(1)));
@@ -243,6 +246,7 @@ export class StageServer {
     // ?preview=1：控制台里的预览，静音、不回执
     const speaker = url.searchParams.get('preview') !== '1';
     const unsubscribe = this.options.stage.subscribe(send, speaker);
+    if (speaker && this.options.stage.watchers === 1) this.options.music?.connect?.();
     const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
     req.on('close', () => {
       clearInterval(ping);

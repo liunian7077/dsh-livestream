@@ -1,7 +1,7 @@
 /**
  * 主人控制台：连直播间、开播下播、OBS 地址、换模板和角色、舞台预览、看弹幕、跟她说话、模拟观众。
  *
- * 开播 = 开一个「大肥鱼直播」会话 + 身体开播（/onair，带上这个会话）。之后往会话里推事情的是身体（宿主端），
+ * 开播 = 用选定的主播预设开一个会话 + 身体开播（/onair，带上这个会话）。之后往会话里推事情的是身体（宿主端），
  * 这一页关掉也不影响直播。
  */
 
@@ -11,19 +11,13 @@ import type { LivePlatform } from '../core/live';
 import type { GiftPrice, StageFinance, StageSong, StageSongs } from '../stage/protocol';
 import { SONG_PLAYBACK_LABELS } from '../stage/protocol';
 import { viewerName } from '../core/viewerName';
+import { chooseLivePreset, type LivePresetOption } from '../core/livePresets';
+import { createBrainSession, type BrainSessionServices } from './brainSession';
 
 // ── DSH 服务 ──────────────────────────────────────────
 
-interface RemoteResult { ok: boolean; error?: { message: string } }
-
-export interface ConsoleServices {
-  workspaces: { list: { getSnapshot(): { items: readonly { workspaceId: string }[] } } };
+export interface ConsoleServices extends BrainSessionServices {
   uiWorkspace: { openSession(sessionId: string): void };
-  sessions: {
-    create(opts: { workspaceId: string }): Promise<string>;
-    using<T>(target: string, options: { source: string }, operation: (reference: { ready: Promise<{ session: any }> }) => T | Promise<T>): Promise<T>;
-  };
-  remote: { agentPresets: { select(sessionId: string, presetId: string): Promise<RemoteResult> } };
   layout: { selectPanel(panelId: string | null): void };
 }
 
@@ -61,9 +55,6 @@ function useServices(): ConsoleServices | null {
 
 // ── 宿主接口 ──────────────────────────────────────────
 
-const PRESET_ID = 'dsh-livestream';
-/** 游戏线（另一个会话里的她，专门玩游戏）用的预设 */
-const GAME_PRESET_ID = 'dsh-livestream-game';
 const SECRET_REFS = { cookie: 'BILIBILI_COOKIE', douyin: 'DOUYIN_COOKIE', tts: 'DOUBAO_TTS_API_KEY', music: 'NETEASE_COOKIE' } as const;
 
 interface PackEntry { id: string; name: string; builtin: boolean; canvas?: [number, number] }
@@ -95,7 +86,7 @@ interface HostState {
   ok: boolean;
   show: ShowStatus;
   broadcast: BroadcastStatus;
-  settings: { platform: LivePlatform; roomId: number | null; stageTitle: string; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; songRequest?: boolean; songQueueMax?: number; songPerUserMax?: number; initialBalanceYuan: number | null; giftPrices: GiftPrice[]; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
+  settings: { platform: LivePlatform; roomId: number | null; stageTitle: string; agentPreset?: string; character: string; template: string; voice: string; stagePort: number; idleAfterSec: number; gameChatGapSec?: number; distillModel: string; ownRooms: number[]; broadcast: boolean; areaId: number | null; liveTitle: string; pushProtocol: 'srt' | 'rtmp'; streamKbps: number; asrPython: string; asrModel: string; boardText: string; noticeText?: string; songRequest?: boolean; backgroundMusic?: boolean; backgroundMusicVolume?: number; songQueueMax?: number; songPerUserMax?: number; initialBalanceYuan: number | null; giftPrices: GiftPrice[]; pace?: { welcomeSec?: number | 'off'; thanksSec?: number; followSec?: number; chatPicks?: number } };
   finance: StageFinance;
   stageUrl: string;
   characters: PackEntry[];
@@ -108,6 +99,8 @@ interface HostState {
   };
   defaultBoard: string;
 }
+
+interface LivePresetsResponse { ok: boolean; presets: LivePresetOption[] }
 
 async function api<T = HostState>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/dsh-livestream/${path}`, body === undefined
@@ -182,24 +175,6 @@ function useLive(): Live {
 }
 
 // ── 开播：会话 ────────────────────────────────────────
-
-/** 开一个用「大肥鱼直播」预设的会话（她直播用） */
-async function createBrainSession(svc: ConsoleServices, line: 'live' | 'game' = 'live'): Promise<string> {
-  const workspace = svc.workspaces.list.getSnapshot().items[0];
-  if (!workspace) throw new Error('先在 DSH 里打开一个工作区。');
-  const sessionId = await svc.sessions.create({ workspaceId: workspace.workspaceId });
-  const selected = await svc.remote.agentPresets.select(sessionId, line === 'game' ? GAME_PRESET_ID : PRESET_ID);
-  if (!selected.ok) throw new Error(selected.error?.message ?? `没能用上「${line === 'game' ? '大肥鱼直播·游戏线' : '大肥鱼直播'}」预设。`);
-  // 让会话就绪（agent 起来），身体才能往里推
-  // 会话列表里一眼认得出是哪一场（不然叫「未命名」）
-  const d = new Date();
-  const title = `直播${line === 'game' ? '游戏线' : ''} · ${d.getMonth() + 1}月${d.getDate()}日 ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
-  await svc.sessions.using(sessionId, { source: 'controllerOperation' }, async (reference) => {
-    const { session } = await reference.ready;
-    await session.rename?.(title)?.catch?.(() => {});
-  });
-  return sessionId;
-}
 
 async function cancel(svc: ConsoleServices, sessionId: string): Promise<void> {
   await svc.sessions.using(sessionId, { source: 'controllerOperation' }, async (reference) => {
@@ -311,6 +286,8 @@ export function Console() {
   const svc = useServices();
   const { status, feed, focus, brainDetail, broadcast: liveBc, songs: liveSongs, finance: liveFinance } = useLive();
   const [host, setHost] = useState<HostState | null>(null);
+  const [presets, setPresets] = useState<LivePresetOption[] | null>(null);
+  const [presetError, setPresetError] = useState('');
   const [busy, error, run] = useBusy();
   const [room, setRoom] = useState('');
   const [copied, setCopied] = useState(false);
@@ -321,20 +298,33 @@ export function Console() {
 
   const refresh = () => api('state').then((s) => { setHost(s); setRoom((r) => r || (s.settings.roomId ? String(s.settings.roomId) : '')); });
   useEffect(() => { void refresh().catch(() => {}); }, []);
+  useEffect(() => {
+    if (!drawer) return;
+    let active = true;
+    setPresetError('');
+    setPresets(null);
+    void api<LivePresetsResponse>('presets').then((response) => {
+      if (active) setPresets(response.presets);
+    }).catch((error) => { if (active) setPresetError((error as Error).message); });
+    return () => { active = false; };
+  }, [drawer]);
 
   const show = status ?? host?.show ?? null;
   const settings = host?.settings;
 
   const goLive = () => run(async () => {
     if (!svc) throw new Error('插件还没准备好，刷新一下页面再试。');
+    // 每次开播重查，已删除/损坏的明确选择不偷偷退回默认预设；先就绪再推流。
+    const roster = await api<LivePresetsResponse>('presets');
+    const preset = chooseLivePreset(roster.presets, settings?.agentPreset);
+    const sessionId = await createBrainSession(svc, preset.id);
+    // 游戏线有独立的工具和职责，不覆盖主播的自定义预设。
+    const gameSessionId = await createBrainSession(svc, preset.id, 'game').catch(() => undefined);
     // 推流到 B 站：先开播拿推流码、OBS 推上流（可能要扫码人脸认证），推上了她再开口
     if (settings?.broadcast) {
       await api('broadcast/start', {});
       await waitBroadcast();
     }
-    const sessionId = await createBrainSession(svc);
-    // 游戏线：没装 dsh-game（预设里没有游戏工具）也开得出来，只是用不上
-    const gameSessionId = await createBrainSession(svc, 'game').catch(() => undefined);
     await api('onair', { sessionId, gameSessionId });
     await refresh();
   });
@@ -413,7 +403,7 @@ export function Console() {
             )}
             {show?.onAir
               ? <button className="dl-btn dl-danger" disabled={busy} onClick={endLive}>下播（先让她道别）</button>
-              : <button className="dl-btn dl-primary" disabled={busy || bc?.phase === 'preparing' || bc?.phase === 'face'} onClick={goLive}><i className="dl-go-dot" />{settings?.broadcast ? '开播' : '开始彩排'}</button>}
+              : <button className="dl-btn dl-primary" disabled={busy || !host || bc?.phase === 'preparing' || bc?.phase === 'face'} onClick={goLive}><i className="dl-go-dot" />{settings?.broadcast ? '开播' : '开始彩排'}</button>}
           </div>
         </header>
         {error && <p className="dl-error dl-banner">{error}</p>}
@@ -505,6 +495,18 @@ export function Console() {
             <header><h2>设置</h2><button className="dl-icon-btn" onClick={() => setDrawer(false)}>关闭</button></header>
             <h3>直播间</h3>
             <div className="dl-field">
+              <label htmlFor="dl-agent-preset">主播 Agent 预设</label>
+              <select id="dl-agent-preset" aria-describedby="dl-agent-preset-hint" value={settings?.agentPreset ?? ''} disabled={busy || !!show?.onAir || presets === null} onChange={(e) => choose({ agentPreset: e.target.value })}>
+                <option value="">自动（优先 DSH 默认的直播预设）</option>
+                {settings?.agentPreset && !presets?.some((preset) => preset.id === settings.agentPreset) && <option value={settings.agentPreset} disabled>{presets === null ? '正在加载…' : '已保存的预设不可用'}</option>}
+                {presets?.map((preset) => <option key={preset.id} value={preset.id} disabled={!!preset.unavailable}>{preset.name}{preset.unavailable ? `（${preset.unavailable}）` : ''}</option>)}
+              </select>
+              <p id="dl-agent-preset-hint" className="dl-hint">选择后自动保存，下次开播使用。可从“大肥鱼抖音直播”复制自定义预设，保留直播回复插件；开播后需先下播才能切换。</p>
+              {presets === null && !presetError && <p className="dl-hint" role="status">正在读取预设…</p>}
+              {presetError && <p className="dl-error" role="alert">{presetError}</p>}
+              {error && <p className="dl-error" role="alert">{error}</p>}
+            </div>
+            <div className="dl-field">
               <label htmlFor="dl-stage-title">直播间显示名称</label>
               <input id="dl-stage-title" defaultValue={settings?.stageTitle ?? ''} maxLength={40} placeholder="比如：大肥鱼的直播间" onBlur={(e) => { if (e.target.value !== settings?.stageTitle) choose({ stageTitle: e.target.value }); }} />
               <p className="dl-hint">保存后立即更新舞台。留空时跟随已连接平台的直播标题；未连接时使用角色默认名称。</p>
@@ -593,6 +595,18 @@ export function Console() {
               <p className="dl-hint">写法：「点歌 晴天」「点歌 晴天 周杰伦」「点歌 晴天--周杰伦」。歌曲播放结束后自动换下一首，也可以手动跳过。请保持 OBS 舞台浏览器源开启；控制台预览保持静音。仅支持当前账号有权播放的完整音源。</p>
             </div>
             <SecretField label="网易云 Cookie（可选）" ref_={SECRET_REFS.music} configured={secrets.music} hint="登录网易云网页版后复制 Cookie；未配置时使用公开音源" />
+            <h3>背景音乐</h3>
+            <div className="dl-field">
+              <label className="dl-check">
+                <input type="checkbox" checked={settings?.backgroundMusic !== false} onChange={(e) => choose({ backgroundMusic: e.target.checked })} />
+                空闲时循环播放轻柔纯音乐
+              </label>
+              <div className="dl-row">
+                <input key={settings?.backgroundMusicVolume ?? 12} type="number" min="0" max="100" defaultValue={settings?.backgroundMusicVolume ?? 12} title="背景音乐音量" onBlur={(e) => choose({ backgroundMusicVolume: e.target.value === '' ? 12 : Math.max(0, Math.min(100, Number(e.target.value) || 0)) })} />
+                <span className="dl-meta">%：默认 12%，只调整背景音乐</span>
+              </div>
+              <p className="dl-hint">内置无人声纯音乐，无需网易云登录。点歌加载和播放期间暂停，整条队列播完后接着播放；主播说话时进一步降低音量。下播、放视频或展示游戏时暂停。</p>
+            </div>
             <h3>节奏</h3>
             <div className="dl-field">
               <div className="dl-row">

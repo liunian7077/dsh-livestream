@@ -37,6 +37,7 @@ export class Stage {
 
   broadcast(event: StageEventInput): void {
     const full = { v: 1, at: Date.now(), ...event } as StageEvent;
+    if (full.type === 'backgroundMusic') this.latest.set(full.type, full);
     if (full.type === 'room' || full.type === 'brain' || full.type === 'usage' || full.type === 'finance' || full.type === 'media' || full.type === 'board' || full.type === 'game' || full.type === 'gameStatus' || full.type === 'notice' || full.type === 'stageTitle' || full.type === 'songs') this.latest.set(full.type, full);
     for (const listen of this.listeners) {
       try {

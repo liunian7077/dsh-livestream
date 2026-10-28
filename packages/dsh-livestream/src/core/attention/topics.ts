@@ -50,7 +50,7 @@ export type TopicBody =
    */
   | {
     kind: 'song';
-    outcome: 'loading' | 'playing' | 'queued' | 'notfound' | 'duplicate' | 'full' | 'tooMany' | 'error';
+    outcome: 'loading' | 'playing' | 'queued' | 'notfound' | 'blocked' | 'duplicate' | 'full' | 'tooMany' | 'error';
     /** 观众点的原话（点歌后面那段） */
     asked: string;
     /** 谁点的 */

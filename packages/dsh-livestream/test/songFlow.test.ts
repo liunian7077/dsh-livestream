@@ -13,6 +13,7 @@ import type { LiveEvent } from '../src/core/live';
  */
 
 let seq = 0;
+const resources: Array<{ show: LiveShow; book: Songbook }> = [];
 /** 每条弹幕一个独立 id（真实平台的 msg id 本来就不同；同 id 会被 LiveHub 当重复丢掉） */
 function chat(text: string, id = 'u1', name = '爱丽丝'): LiveEvent {
   return { id: `chat-${++seq}`, kind: 'chat', platform: 'bilibili', ts: Date.now(), user: { id, name }, text };
@@ -25,17 +26,19 @@ function setup() {
   const played: string[] = [];
   const book = new Songbook({
     find: async (query) => (query.title === '不存在' ? null : { ...track(query.title), score: 1 }),
-    play: (song) => played.push(song.name),
+    resolve: async (song) => { played.push(song.name); return `https://audio.example/${song.id}`; },
   });
   const show = new LiveShow(
     { push: async (_s, text) => { pushed.push(text); return true; }, synthesize: async () => null, log: () => {} },
     { dataDir: mkdtempSync(join(tmpdir(), 'dsh-song-')), names: ['大肥鱼'], songs: () => book },
   );
   show.goLive('s1');
+  resources.push({ show, book });
   return { show, book, pushed, played };
 }
 
 afterEach(() => {
+  for (const { show, book } of resources.splice(0)) { show.dispose(); book.stop(); }
   vi.useRealTimers();
 });
 
@@ -72,12 +75,13 @@ describe('song requests through the live show', () => {
     const played: string[] = [];
     const book = new Songbook({
       find: async (query) => ({ ...track(query.title), score: 1 }),
-      play: (song) => played.push(song.name),
+      resolve: async (song) => { played.push(song.name); return `https://audio.example/${song.id}`; },
     });
     const show = new LiveShow(
       { push: async () => true, synthesize: async () => null, log: () => {} },
       { dataDir: mkdtempSync(join(tmpdir(), 'dsh-song-')), names: ['大肥鱼'], songs: () => book },
     );
+    resources.push({ show, book });
 
     // 没开播：真实观众的弹幕不该抢播放器
     show.inject(chat('点歌 晴天', 'real-1'));

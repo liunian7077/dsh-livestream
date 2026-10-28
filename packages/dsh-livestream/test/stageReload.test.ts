@@ -1,15 +1,22 @@
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Packs } from '../src/body/packs';
 import { StageServer } from '../src/body/server';
 import { Stage } from '../src/body/stage';
+import { Songbook } from '../src/body/songbook';
 
 let dir = '';
 let server: StageServer | null = null;
+const connections: AbortController[] = [];
+let book: Songbook | null = null;
 
 afterEach(() => {
+  for (const connection of connections.splice(0)) connection.abort();
+  book?.stop();
+  book = null;
+  vi.restoreAllMocks();
   server?.stop();
   server = null;
   if (dir) rmSync(dir, { recursive: true, force: true });
@@ -55,6 +62,86 @@ async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, decode
 }
 
 describe('stage server hot reload', () => {
+  it('serves the local instrumental behind stage authentication and replays its settings to new pages', async () => {
+    dir = makePackage();
+    mkdirSync(join(dir, 'assets', 'music'), { recursive: true });
+    writeFileSync(join(dir, 'assets', 'music', 'quiet-room.wav'), 'RIFF-test-audio');
+    const stage = new Stage();
+    stage.broadcast({ type: 'backgroundMusic', settings: { enabled: true, volume: 0.12 } });
+    server = new StageServer({
+      port: 0, token: 'test-token', packageDir: dir,
+      packs: new Packs(dir, join(dir, 'user')), stage,
+      current: () => ({ character: 'test', template: 'test' }),
+    });
+    await server.start();
+    const origin = new URL(server.url).origin;
+    expect((await fetch(`${origin}/background-music.wav`)).status).toBe(401);
+    const audio = await fetch(`${origin}/background-music.wav?token=test-token`);
+    expect(audio.status).toBe(200);
+    expect(audio.headers.get('content-type')).toBe('audio/wav');
+    expect(await audio.text()).toBe('RIFF-test-audio');
+    const controller = new AbortController(); connections.push(controller);
+    const events = await fetch(`${origin}/events?preview=1&token=test-token`, { signal: controller.signal });
+    const stream = await readUntil(events.body!.getReader(), new TextDecoder(), '"type":"backgroundMusic"');
+    expect(stream).toContain('"volume":0.12');
+    expect(stage.watchers).toBe(0);
+  });
+
+  it('keeps preview separate from playback, reconnects music, and advances after a CDN failure', async () => {
+    dir = makePackage();
+    const stage = new Stage();
+    book = new Songbook({
+      find: async (q) => ({ id: q.title, name: q.title, artists: [], album: '', durationMs: 180_000, score: 1 }),
+      resolve: async (song) => `https://audio.example/${song.id}`,
+      hasStage: () => stage.watchers > 0,
+    });
+    const connected = vi.spyOn(book, 'connect');
+    const disconnected = vi.spyOn(book, 'disconnect');
+    server = new StageServer({
+      port: 0, token: 'test-token', packageDir: dir,
+      packs: new Packs(dir, join(dir, 'user')), stage, music: book,
+      current: () => ({ character: 'test', template: 'test' }),
+    });
+    await server.start();
+    await book.request({ title: 'one', raw: 'one' }, { id: '1', name: '甲' });
+    await book.request({ title: 'two', raw: 'two' }, { id: '2', name: '乙' });
+    const first = book.playing!;
+    const subscribe = async (preview = false) => {
+      const controller = new AbortController();
+      connections.push(controller);
+      const response = await fetch(`${server!.url.replace('/?', '/events?')}${preview ? '&preview=1' : ''}`, { signal: controller.signal });
+      await readUntil(response.body!.getReader(), new TextDecoder(), '"type":"hello"');
+      return controller;
+    };
+    await subscribe(true);
+    expect(stage.watchers).toBe(0);
+    expect(connected).not.toHaveBeenCalled();
+    const firstWindow = await subscribe();
+    expect(connected).toHaveBeenCalledTimes(1);
+    const secondWindow = await subscribe();
+    expect(connected).toHaveBeenCalledTimes(1);
+    book.report(first.seq, 'playing', 10_000);
+    firstWindow.abort();
+    await vi.waitFor(() => expect(stage.watchers).toBe(1));
+    expect(disconnected).not.toHaveBeenCalled();
+    secondWindow.abort();
+    await vi.waitFor(() => expect(stage.watchers).toBe(0));
+    expect(disconnected).toHaveBeenCalledTimes(1);
+    expect(book.playback).toMatchObject({ status: 'paused', positionMs: 10_000 });
+    await subscribe();
+    expect(connected).toHaveBeenCalledTimes(2);
+    expect(book.playback).toMatchObject({ status: 'loading', positionMs: 10_000 });
+
+    const fetchLocal = globalThis.fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => String(url).startsWith('https://audio.example/')
+      ? Promise.resolve(new Response('unavailable', { status: 403 })) : fetchLocal(url, init));
+    const response = await fetch(`${new URL(server.url).origin}/music?seq=${first.seq}&token=test-token`);
+    expect(response.status).toBe(403);
+    await response.text();
+    expect(book.playing?.song.name).toBe('two');
+    expect(book.playback?.status).toBe('loading');
+  });
+
   it('tells an open stage page to reload when the stage bundle is rebuilt', async () => {
     dir = makePackage();
     server = new StageServer({

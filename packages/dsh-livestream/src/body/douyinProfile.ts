@@ -49,6 +49,8 @@ function profileOf(body: any, expected?: string): DouyinProfile | null {
 /** 只打开抖音公开页面。独立用户目录保留登录态；浏览器操作串行，避免两个查询串到同一主页。 */
 export class DouyinProfiles {
   private context: BrowserContext | null = null;
+  /** 设置里主动打开的登录页需保留；自动查询不能占用或关闭它。 */
+  private loginPage: Page | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private appliedCookie = '';
 
@@ -60,7 +62,7 @@ export class DouyinProfiles {
     return task;
   }
 
-  private async page(): Promise<Page> {
+  private async browser(): Promise<BrowserContext> {
     if (!this.context) {
       const { chromium } = await import('playwright-core');
       for (const channel of ['chrome', 'msedge']) {
@@ -71,7 +73,13 @@ export class DouyinProfiles {
       }
       if (!this.context) throw new Error('抖音窗口未能启动；请确认本机已安装 Chrome 或 Edge，并关闭之前打开的抖音查询窗口后重试。');
       const context = this.context;
-      context.on('close', () => { if (this.context === context) { this.context = null; this.appliedCookie = ''; } });
+      context.on('close', () => {
+        if (this.context === context) {
+          this.context = null;
+          this.loginPage = null;
+          this.appliedCookie = '';
+        }
+      });
     }
     try {
       const cookie = await this.cookie();
@@ -79,7 +87,7 @@ export class DouyinProfiles {
         await this.context.addCookies([...parseCookie(cookie)].map(([name, value]) => ({ name, value, domain: '.douyin.com', path: '/', secure: true })));
         this.appliedCookie = cookie;
       }
-      return this.context.pages().find((p) => !p.isClosed()) ?? await this.context.newPage();
+      return this.context;
     } catch {
       // 浏览器错误可能带 Cookie 参数，不把原始异常交给主播。
       throw new Error('抖音窗口暂不可用；请检查设置中的抖音 Cookie，或重新打开窗口登录后重试。');
@@ -88,9 +96,18 @@ export class DouyinProfiles {
 
   openLogin(): Promise<void> {
     return this.serial(async () => {
-      const page = await this.page();
-      await page.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 25_000 });
-      await page.bringToFront();
+      try {
+        const context = await this.browser();
+        const page = this.loginPage && !this.loginPage.isClosed() ? this.loginPage
+          : context.pages().find((p) => !p.isClosed()) ?? await context.newPage();
+        this.loginPage = page;
+        await page.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 25_000 });
+        await page.bringToFront();
+      } catch {
+        // 获取 Cookie 或创建页面失败也不能留下无用途的后台浏览器。
+        if (!this.loginPage || this.loginPage.isClosed()) await this.closeBrowser();
+        throw new Error('抖音登录页暂不可用，请检查网络和抖音 Cookie 后重试。');
+      }
     });
   }
 
@@ -98,32 +115,62 @@ export class DouyinProfiles {
     return this.serial(async () => {
       const secUid = target === '自己' ? null : douyinSecUid(target);
       if (target !== '自己' && !secUid) throw new Error('缺少抖音主页标识；请提供完整的 douyin.com/user/… 主页链接。');
-      const page = await this.page();
-      // 让抖音网页自己完成签名，只读取这个主页实际返回的公开资料。
-      const response = page.waitForResponse((res) => {
-        const url = new URL(res.url());
-        if (url.origin !== 'https://www.douyin.com' || !res.ok()) return false;
-        if (secUid) return url.pathname === '/aweme/v1/web/user/profile/other/' && url.searchParams.get('sec_user_id') === secUid;
-        return url.pathname === '/aweme/v1/web/user/profile/self/';
-      }, { timeout: 20_000 }).then((res) => res.json()).catch(() => null);
-      let navigated = true;
+      let page: Page | null = null;
+      let responseTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await page.goto(`https://www.douyin.com/user/${secUid ?? 'self'}`, { waitUntil: 'domcontentloaded', timeout: 25_000 });
-      } catch { navigated = false; }
-      const profile = profileOf(await response, secUid ?? undefined);
-      if (!profile) throw new Error(navigated
-        ? '抖音没有返回可核对的主页资料；请在设置中打开抖音窗口完成登录或验证，再重试。也可能是主页不可见或网页已改版。'
-        : '抖音主页没打开，检查网络后重试。');
-      return profile;
+        const context = await this.browser();
+        // 查询始终使用自己的标签页，不导航用户正在登录或验证的页面。
+        try { page = await context.newPage(); }
+        catch { throw new Error('抖音查询页未能打开，请重新打开抖音窗口后重试。'); }
+        // 让抖音网页自己完成签名，只读取这个主页实际返回的公开资料。
+        const received = page.waitForResponse((res) => {
+          const url = new URL(res.url());
+          if (url.origin !== 'https://www.douyin.com' || !res.ok()) return false;
+          if (secUid) return url.pathname === '/aweme/v1/web/user/profile/other/' && url.searchParams.get('sec_user_id') === secUid;
+          return url.pathname === '/aweme/v1/web/user/profile/self/';
+        }, { timeout: 20_000 }).then((res) => res.json()).catch(() => null);
+        // waitForResponse 只等响应头，正文下载也必须有上限，否则窗口仍可能一直留着。
+        const response = Promise.race([received, new Promise<null>((resolve) => {
+          responseTimer = setTimeout(() => resolve(null), 20_000);
+          responseTimer.unref?.();
+        })]);
+        let navigated = true;
+        try {
+          await page.goto(`https://www.douyin.com/user/${secUid ?? 'self'}`, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+        } catch { navigated = false; }
+        const profile = profileOf(await response, secUid ?? undefined);
+        if (!profile) throw new Error(navigated
+          ? '抖音没有返回可核对的主页资料；请在设置中打开抖音窗口完成登录或验证，再重试。也可能是主页不可见或网页已改版。'
+          : '抖音主页没打开，检查网络后重试。');
+        return profile;
+      } finally {
+        if (responseTimer) clearTimeout(responseTimer);
+        if (this.loginPage && !this.loginPage.isClosed()) {
+          // 用户的登录窗口留着，查询页无论成功、超时还是验证失败都关闭。
+          try { if (page && !page.isClosed()) await page.close(); }
+          catch { throw new Error('抖音查询页未能自动关闭，请手动关闭查询标签页。'); }
+        } else {
+          // 独立查询完成后关闭整个上下文（含启动时的空白页），释放浏览器进程。
+          await this.closeBrowser();
+        }
+      }
     });
   }
 
-  close(): Promise<void> {
-    return this.serial(async () => {
-      await this.context?.close();
+  private async closeBrowser(): Promise<void> {
+    const context = this.context;
+    if (!context) return;
+    try { await context.close(); }
+    catch { throw new Error('抖音查询窗口未能自动关闭，请手动关闭这个独立窗口后重试。'); }
+    if (this.context === context) {
       this.context = null;
+      this.loginPage = null;
       this.appliedCookie = '';
-    });
+    }
+  }
+
+  close(): Promise<void> {
+    return this.serial(() => this.closeBrowser());
   }
 }
 

@@ -3,7 +3,7 @@
  *
  * 字段号来自抖音 webcast 的 protobuf 定义（没有公开 .proto，按字段号取）：
  *
- *   Common       1 method, 2 msgId, 3 roomId, 4 createTime(秒)
+ *   Common       1 method, 2 msgId, 3 roomId, 4 createTime(兼容秒 / 毫秒)
  *   User         1 id, 3 nickName, 9 avatarThumb{1 urlList}, 23 payGrade,
  *                24 fansClub{1 data{1 clubName, 2 level, 6 anchorId}}, 38 displayId, 46 secUid, 1028 idStr
  *   ChatMessage  2 user, 3 content
@@ -80,10 +80,13 @@ function userOf(msg: Map<number, Array<bigint | Buffer>> | undefined, common: Ma
   return out;
 }
 
-/** common.createTime 是秒；缺了就用本地时间 */
+/** 实际消息的 createTime 也会是毫秒；不能再乘 1000，否则谢礼物和按日记账都会失效。 */
 function tsOf(common: Map<number, Array<bigint | Buffer>> | undefined, now: number): number {
-  const seconds = pbNumber(common, 4);
-  return seconds > 0 ? seconds * 1000 : now;
+  const value = pbNumber(common, 4);
+  if (!Number.isSafeInteger(value) || value <= 0) return now;
+  const ms = value < 1_000_000_000_000 ? value * 1000 : value;
+  // 平台时钟超前或时间异常时按接收时间算，避免礼物永远等不到连击结束。
+  return Math.min(ms, now);
 }
 
 function base<K extends LiveEvent['kind']>(kind: K, id: string, user: LiveUser, ts: number) {

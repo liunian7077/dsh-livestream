@@ -9,6 +9,7 @@
  */
 
 import type { SongQuery } from '../core/songRequest';
+import { isRestrictedSong, SONG_RESTRICTION_MESSAGE } from '../core/songPolicy';
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 const SEARCH_URL = 'https://music.163.com/api/search/get/';
@@ -22,6 +23,7 @@ export interface NeteaseSong {
   /** 网易云的歌曲 id（数字，用字符串装） */
   id: string;
   name: string;
+  aliases?: string[];
   artists: string[];
   album: string;
   durationMs: number;
@@ -35,6 +37,7 @@ export interface SongMatch extends NeteaseSong {
 interface RawSong {
   id?: number | string;
   name?: string;
+  alias?: string[];
   duration?: number;
   artists?: Array<{ name?: string }>;
   album?: { name?: string };
@@ -98,9 +101,11 @@ export async function searchSongs(keyword: string, limit = 10, cookie = ''): Pro
     const id = s.id === undefined ? '' : String(s.id);
     const name = (s.name ?? '').trim();
     if (!id || !name) return [];
+    const aliases = Array.isArray(s.alias) ? s.alias.filter((a): a is string => typeof a === 'string' && !!a.trim()) : [];
     return [{
       id,
       name,
+      ...(aliases.length ? { aliases } : {}),
       artists: (s.artists ?? []).map((a) => (a.name ?? '').trim()).filter(Boolean),
       album: (s.album?.name ?? '').trim(),
       durationMs: Number(s.duration) || 0,
@@ -128,6 +133,7 @@ export function webSongUrl(songId: string): string {
 
 /** 取完整音频；没有权限或只有试听时明确报错，不把试听当整首播放。 */
 export async function resolveSong(song: NeteaseSong, cookie = ''): Promise<string> {
+  if (isRestrictedSong(song)) throw new Error(SONG_RESTRICTION_MESSAGE);
   if (!/^\d+$/.test(song.id)) throw new Error('网易云歌曲编号无效');
   const url = `${PLAYER_URL}?ids=${encodeURIComponent(JSON.stringify([song.id]))}&br=128000`;
   const res = await fetch(url, {
